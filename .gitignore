@@ -1,0 +1,7 @@
+kite_config.json
+iron_condor_algo_reference.txt
+.bot.lock
+.bot_heartbeat.txt
+trade_log.csv
+__pycache__/
+*.pyc
