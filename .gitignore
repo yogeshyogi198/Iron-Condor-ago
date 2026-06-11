@@ -1,6 +1,6 @@
 kite_config.json
 iron_condor_algo_reference.txt
-.bot.lock
+.bot_lock_*
 .bot_heartbeat.txt
 trade_log.csv
 __pycache__/

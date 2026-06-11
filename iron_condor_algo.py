@@ -54,7 +54,9 @@ TRADE_LOG_FIELDS = [
     "pnl", "max_profit_target", "stop_loss", "exit_reason",
 ]
 
-LOCK_FILE = os.path.join(os.path.dirname(__file__), ".bot.lock")
+def _lock_file_for(strategy: str) -> str:
+    return os.path.join(os.path.dirname(__file__), f".bot_lock_{strategy}")
+
 HEARTBEAT_FILE = os.path.join(os.path.dirname(__file__), ".bot_heartbeat.txt")
 
 _last_known_ipv4 = ""
@@ -179,18 +181,18 @@ def _is_pid_running(pid: int) -> bool:
     except Exception:
         return False
 
-def acquire_lock() -> bool:
+def acquire_lock(lock_file: str) -> bool:
     crashed = False
-    if os.path.exists(LOCK_FILE):
-        with open(LOCK_FILE) as f:
+    if os.path.exists(lock_file):
+        with open(lock_file) as f:
             pid = f.read().strip()
         if pid and _is_pid_running(int(pid)):
             print(f"Another instance (PID {pid}) already running. Exiting.")
             return False
         crashed = True
-    with open(LOCK_FILE, "w") as f:
+    with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
-    atexit.register(lambda: os.remove(LOCK_FILE) if os.path.exists(LOCK_FILE) else None)
+    atexit.register(lambda: os.remove(lock_file) if os.path.exists(lock_file) else None)
     if crashed:
         print("Iron Condor Bot crashed and will restart.\nCheck .bot_heartbeat.txt for last activity.")
     return True
@@ -1995,7 +1997,7 @@ def main():
             print(f"Login failed: {e}")
         return
 
-    if not acquire_lock():
+    if not acquire_lock(_lock_file_for(args.strategy)):
         return
 
     # Normal run — no prompts, just execute
