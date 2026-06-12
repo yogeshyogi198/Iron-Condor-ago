@@ -10,33 +10,63 @@ Automated trading bot for NIFTY/SENSEX options on Zerodha.
 | `--strategy cs` | Credit Spread (ADX+EMA), fallback to IC | NIFTY |
 | `--strategy sma` | SMA(60) Crossover | SENSEX |
 
+## Setup
+
+1. Clone the repo
+2. Copy `.env.example` to `.env` and fill in your secrets
+3. Configure your Zerodha API credentials in `kite_config.json`:
+
+```json
+{
+  "api_key": "your_api_key",
+  "api_secret": "your_api_secret",
+  "access_token": "your_access_token"
+}
+```
+
+4. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
 ## One-Time Login
 
-Run once to authorize (token saved for months):
-
-```
-cd "C:\Users\yogesha M\Desktop\iron_condor_algo"
+```bash
 python iron_condor_algo.py --login
 ```
 
-## Run
+## Run Bot
 
+```bash
+python iron_condor_algo.py --strategy ic
 ```
-python iron_condor_algo.py --strategy sma
+
+## Dashboard
+
+```bash
+# Local
+python dashboard.py
+
+# Production (Digital Ocean / Linux)
+gunicorn dashboard:app --bind 0.0.0.0:8000 --workers 2
 ```
 
-## Schedule (24/7 background)
+Set `FLASK_DEBUG=1` env var to enable debug mode.
 
-1. Open **Task Scheduler** (Win+R -> `taskschd.msc`)
-2. **Create Task**:
-   - General: Name=`IronCondorBot`, check "Run whether user is logged on"
-   - Triggers: "At startup" or "Daily" at 9:00 AM
-   - Actions: Start `python` with arg `iron_condor_algo.py --strategy sma`
-   - Start in: `C:\Users\yogesha M\Desktop\iron_condor_algo`
-   - Conditions: Uncheck battery/AC power options
-3. Click OK (enter Windows password if prompted)
+## Deploy to Digital Ocean
 
-Bot auto-recovers on reboot. Stop via Task Scheduler -> Disable.
+1. Push this repo to GitHub
+2. Create App Platform app → select GitHub repo
+3. Set **Run Command**: `gunicorn dashboard:app --bind 0.0.0.0:8000 --workers 2`
+4. Add these **Environment Variables** in App Platform settings:
+   - `DASHBOARD_PASSWORD` — your dashboard password
+   - `TELEGRAM_BOT_TOKEN` — your Telegram bot token
+   - `TELEGRAM_CHAT_ID` — your Telegram chat ID
+   - `FLASK_DEBUG` — leave empty (or `0`)
+5. Deploy
+
+> Bot (`iron_condor_algo.py`) runs inside the dashboard's "Start" button — no separate process needed.
 
 ## Notes
 

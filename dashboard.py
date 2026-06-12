@@ -14,13 +14,20 @@ Features:
 import json
 import os
 import signal
+import secrets
 import subprocess
 import sys
 import threading
+from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template_string, request
+from datetime import datetime
+
+from dotenv import load_dotenv
+from flask import Flask, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
+
+load_dotenv()
 
 BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
@@ -29,6 +36,50 @@ HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
 STRATEGIES = ["ic", "cs", "sma"]
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
+
+PASSWORD_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard Login</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 40px; width: 440px; }
+  h1 { color: #58a6ff; font-size: 1.8rem; margin-bottom: 24px; text-align: center; }
+  input { width: 100%; padding: 16px 20px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-size: 1.2rem; margin-bottom: 18px; }
+  .btn { width: 100%; padding: 16px; border: none; border-radius: 10px; font-size: 1.2rem; font-weight: 600; cursor: pointer; background: #238636; color: #fff; }
+  .btn:hover { background: #2ea043; }
+  .error { color: #f85149; text-align: center; margin-top: 12px; font-size: 1rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#128274; Dashboard Login</h1>
+  <form method="POST" action="/login">
+    <input type="password" name="password" placeholder="Enter password" autofocus>
+    <button type="submit" class="btn">Unlock</button>
+  </form>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+</div>
+</body>
+</html>"""
+
+
+def get_dashboard_password() -> str:
+    return os.environ.get("DASHBOARD_PASSWORD", "") or load_config().get("dashboard_password", "")
+
+
+def require_auth(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        pw = get_dashboard_password()
+        if pw and not session.get("authenticated"):
+            return render_template_string(PASSWORD_PAGE, error="")
+        return f(*args, **kwargs)
+    return wrapped
 bot_processes: dict[str, subprocess.Popen | None] = {s: None for s in STRATEGIES}
 bot_outputs: dict[str, list[str]] = {s: [] for s in STRATEGIES}
 bot_output_locks: dict[str, threading.Lock] = {s: threading.Lock() for s in STRATEGIES}
@@ -69,24 +120,24 @@ PAGE = r"""<!DOCTYPE html>
 <title>Trading Bot Dashboard</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; font-size: 18px; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 28px; font-size: 22px; }
   .container { max-width: 100%; margin: 0 auto; }
-  h1 { color: #58a6ff; font-size: 1.8rem; margin-bottom: 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  h1 small { font-size: 0.85rem; color: #8b949e; font-weight: 400; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px; margin-bottom: 20px; }
-  .strategy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  .strat { background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
-  .strat .name { font-size: 1.1rem; font-weight: 700; color: #58a6ff; }
-  .strat .status { font-size: 0.9rem; }
-  .strat .status .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  h1 { color: #58a6ff; font-size: 2.4rem; margin-bottom: 28px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 small { font-size: 1rem; color: #8b949e; font-weight: 400; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; margin-bottom: 24px; }
+  .strategy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .strat { background: #0d1117; border: 1px solid #30363d; border-radius: 12px; padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+  .strat .name { font-size: 1.4rem; font-weight: 700; color: #58a6ff; }
+  .strat .status { font-size: 1.1rem; }
+  .strat .status .dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 8px; }
   .strat .status .dot.green { background: #3fb950; }
   .strat .status .dot.red { background: #f85149; }
   .strat .status .dot.gray { background: #484f58; }
-  .strat .btn-row { display: flex; gap: 8px; }
+  .strat .btn-row { display: flex; gap: 12px; }
   .strat .btn-row .btn { flex: 1; }
-  .strat .mini-log { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.7rem; max-height: 120px; overflow-y: auto; line-height: 1.5; color: #8b949e; }
+  .strat .mini-log { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.9rem; max-height: 250px; overflow-y: auto; line-height: 1.6; color: #8b949e; }
   .strat .mini-log .hl { color: #c9d1d9; }
-  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 14px 28px; border: none; border-radius: 10px; font-size: 1.1rem; font-weight: 600; cursor: pointer; }
   .btn-primary { background: #238636; color: #fff; }
   .btn-primary:hover { background: #2ea043; }
   .btn-primary:disabled { background: #1b5e2a; opacity: 0.5; cursor: not-allowed; }
@@ -95,40 +146,40 @@ PAGE = r"""<!DOCTYPE html>
   .btn-danger:disabled { background: #7a1414; opacity: 0.5; cursor: not-allowed; }
   .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
   .btn-secondary:hover { background: #30363d; }
-  .top-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
-  .top-row .stat-box { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 20px; text-align: center; min-width: 120px; }
-  .top-row .stat-box .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-  .top-row .stat-box .value { font-size: 1.2rem; font-weight: 700; margin-top: 4px; }
+  .top-row { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+  .top-row .stat-box { background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 16px 28px; text-align: center; min-width: 160px; }
+  .top-row .stat-box .label { font-size: 0.9rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .top-row .stat-box .value { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
   .top-row .stat-box .value.green { color: #3fb950; }
   .top-row .stat-box .value.red { color: #f85149; }
   .top-row .stat-box .value.blue { color: #58a6ff; }
   .tab { display: none; }
   .tab.active { display: block; }
-  .tab-bar { display: flex; gap: 4px; margin-bottom: 14px; }
-  .tab-bar button { padding: 10px 22px; border: 1px solid #30363d; background: #0d1117; color: #8b949e; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 0.95rem; font-weight: 600; }
+  .tab-bar { display: flex; gap: 6px; margin-bottom: 18px; }
+  .tab-bar button { padding: 14px 28px; border: 1px solid #30363d; background: #0d1117; color: #8b949e; border-radius: 10px 10px 0 0; cursor: pointer; font-size: 1.1rem; font-weight: 600; }
   .tab-bar button.active { background: #161b22; color: #c9d1d9; border-bottom: 2px solid #58a6ff; }
-  input { padding: 12px 16px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-size: 1rem; }
+  input { padding: 14px 20px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-size: 1.1rem; }
   input[type="text"], input[type="password"] { width: 100%; }
-  .row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-  .col { display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .col { display: flex; flex-direction: column; gap: 16px; }
   .flex-1 { flex: 1; }
   .mt-8 { margin-top: 8px; }
   .mb-8 { margin-bottom: 8px; }
-  .msg { padding: 14px 18px; border-radius: 8px; margin: 10px 0; font-size: 0.95rem; line-height: 1.5; }
+  .msg { padding: 18px 22px; border-radius: 10px; margin: 12px 0; font-size: 1.1rem; line-height: 1.6; }
   .msg-success { background: #1b7e3a22; border: 1px solid #1b7e3a; color: #7ee787; }
   .msg-error { background: #b71c1c22; border: 1px solid #b71c1c; color: #f85149; }
   .msg-info { background: #1f6feb22; border: 1px solid #1f6feb; color: #58a6ff; }
   a { color: #58a6ff; text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .text-xs { font-size: 0.85rem; color: #8b949e; }
+  .text-xs { font-size: 0.95rem; color: #8b949e; }
   @media (max-width: 768px) {
-    body { padding: 10px; }
-    .strategy-grid { grid-template-columns: 1fr; gap: 12px; }
-    .top-row .stat-box { min-width: 80px; padding: 8px 12px; }
-    .top-row .stat-box .value { font-size: 1rem; }
-    .card { padding: 12px; }
-    .tab-bar button { padding: 6px 10px; font-size: 0.78rem; }
-    .strat .mini-log { font-size: 0.6rem; max-height: 80px; }
+    body { padding: 12px; font-size: 18px; }
+    .strategy-grid { grid-template-columns: 1fr; gap: 16px; }
+    .top-row .stat-box { min-width: 100px; padding: 10px 16px; }
+    .top-row .stat-box .value { font-size: 1.2rem; }
+    .card { padding: 16px; }
+    .tab-bar button { padding: 8px 12px; font-size: 0.85rem; }
+    .strat .mini-log { font-size: 0.75rem; max-height: 150px; }
   }
 </style>
 </head>
@@ -152,12 +203,46 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Market Data card -->
+  <div class="card">
+    <div class="top-row" style="margin-bottom:12px;">
+      <div style="font-size:1.2rem;font-weight:700;color:#58a6ff;">Market Data</div>
+      <div style="font-size:0.85rem;color:#8b949e;" id="market-time"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;">
+      <div class="stat-box" style="min-width:0;">
+        <div class="label">NIFTY</div>
+        <div class="value blue" style="font-size:1.3rem;" id="m-nifty-spot">---</div>
+        <div style="font-size:0.85rem;margin-top:4px;"><span id="m-nifty-chg"></span></div>
+        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">O: <span id="m-nifty-open"></span> H: <span id="m-nifty-high"></span> L: <span id="m-nifty-low"></span></div>
+      </div>
+      <div class="stat-box" style="min-width:0;">
+        <div class="label">SENSEX</div>
+        <div class="value blue" style="font-size:1.3rem;" id="m-sensex-spot">---</div>
+        <div style="font-size:0.85rem;margin-top:4px;"><span id="m-sensex-chg"></span></div>
+        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">O: <span id="m-sensex-open"></span> H: <span id="m-sensex-high"></span> L: <span id="m-sensex-low"></span></div>
+      </div>
+      <div class="stat-box" style="min-width:0;">
+        <div class="label">BANK NIFTY</div>
+        <div class="value blue" style="font-size:1.3rem;" id="m-banknifty-spot">---</div>
+        <div style="font-size:0.85rem;margin-top:4px;"><span id="m-banknifty-chg"></span></div>
+        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">O: <span id="m-banknifty-open"></span> H: <span id="m-banknifty-high"></span> L: <span id="m-banknifty-low"></span></div>
+      </div>
+      <div class="stat-box" style="min-width:0;">
+        <div class="label">SENTIMENT (PCR)</div>
+        <div class="value" style="font-size:1.5rem;" id="m-pcr">---</div>
+        <div style="font-size:0.85rem;margin-top:4px;" id="m-sentiment"></div>
+        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Strategy cards -->
   <div class="strategy-grid" id="strat-grid">
     {% for sid in ['ic','cs','sma'] %}
     <div class="strat" id="strat-{{ sid }}">
       <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)'}[sid] }}</div>
-      <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span></div>
+      <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span> <span class="text-xs" id="resume-{{ sid }}" style="color:#d29922;display:none;">&#9888; Position saved</span></div>
       <div class="btn-row">
         <button class="btn btn-primary" id="start-{{ sid }}" onclick="action('{{ sid }}','start')">&#9654; Start</button>
         <button class="btn btn-danger" id="stop-{{ sid }}" onclick="action('{{ sid }}','stop')" disabled>&#9632; Stop</button>
@@ -200,8 +285,10 @@ PAGE = r"""<!DOCTYPE html>
       <form method="POST" action="/api/config" class="col">
         <input type="text" name="api_key" placeholder="API Key" value="{{ api_key }}">
         <input type="password" name="api_secret" placeholder="API Secret">
-        <button type="submit" class="btn btn-primary">Save Keys</button>
+        <input type="password" name="dashboard_password" placeholder="Dashboard Password (leave blank to disable)">
+        <button type="submit" class="btn btn-primary">Save</button>
       </form>
+      <div class="mt-8 text-xs">&#128274; Set a dashboard password to protect controls. <a href="/logout">Logout</a></div>
     </div>
   </div>
 
@@ -246,6 +333,13 @@ async function fetchStatus() {
       $('s-' + s).textContent = running ? 'RUNNING' : 'STOPPED';
       $('start-' + s).disabled = running;
       $('stop-' + s).disabled = !running;
+      const ri = $('resume-' + s);
+      if (d.positions && d.positions[s]) {
+        ri.style.display = 'inline';
+        ri.title = 'Expiry: ' + d.positions[s].expiry + ' | Credit: ?' + d.positions[s].entry_credit;
+      } else {
+        ri.style.display = 'none';
+      }
     }
     $('s-count').textContent = count + '/3';
   } catch(e) {}
@@ -268,6 +362,40 @@ async function fetchLogs() {
 setInterval(fetchLogs, 5000);
 fetchLogs();
 
+async function fetchMarket() {
+  try {
+    const d = await (await fetch('/api/market')).json();
+    if (d.error) return;
+    const green = d.nifty && d.nifty.change >= 0;
+    for (const [prefix, key] of [['nifty','nifty'],['sensex','sensex'],['banknifty','banknifty']]) {
+      const v = d[key];
+      if (!v) continue;
+      const spotEl = $('m-' + prefix + '-spot');
+      spotEl.textContent = v.spot.toLocaleString('en-IN', {minimumFractionDigits:2});
+      spotEl.className = 'value ' + (v.change >= 0 ? 'green' : 'red');
+      spotEl.style.fontSize = '1.3rem';
+      $('m-' + prefix + '-chg').textContent = (v.change >= 0 ? '+' : '') + v.change.toFixed(2) + ' (' + (v.change_pct >= 0 ? '+' : '') + v.change_pct.toFixed(2) + '%)';
+      $('m-' + prefix + '-chg').style.color = v.change >= 0 ? '#3fb950' : '#f85149';
+      $('m-' + prefix + '-open').textContent = v.open.toLocaleString('en-IN', {minimumFractionDigits:2});
+      $('m-' + prefix + '-high').textContent = v.high.toLocaleString('en-IN', {minimumFractionDigits:2});
+      $('m-' + prefix + '-low').textContent = v.low.toLocaleString('en-IN', {minimumFractionDigits:2});
+    }
+    if (d.pcr) {
+      $('m-pcr').textContent = d.pcr.toFixed(2);
+      $('m-pcr').className = 'value';
+      $('m-pcr').style.fontSize = '1.5rem';
+      $('m-pcr').style.color = d.pcr > 1.2 ? '#f85149' : d.pcr < 0.8 ? '#3fb950' : '#d29922';
+      $('m-sentiment').textContent = d.sentiment;
+      $('m-sentiment').style.color = d.pcr > 1.2 ? '#f85149' : d.pcr < 0.8 ? '#3fb950' : '#d29922';
+      $('m-ce-oi').textContent = (d.ce_oi / 1e7).toFixed(2) + 'Cr';
+      $('m-pe-oi').textContent = (d.pe_oi / 1e7).toFixed(2) + 'Cr';
+    }
+    $('market-time').textContent = 'Updated: ' + (d.time || '');
+  } catch(e) {}
+}
+setInterval(fetchMarket, 15000);
+fetchMarket();
+
 $('btn-login')?.addEventListener('click', () => {
   $('login-hint').style.display = 'block';
 });
@@ -278,7 +406,26 @@ document.querySelectorAll('.msg-success, .msg-error').forEach(m => setTimeout(()
 </html>"""
 
 
+@app.route("/login", methods=["POST"])
+def login():
+    pw = get_dashboard_password()
+    if not pw:
+        session["authenticated"] = True
+        return redirect("/")
+    if request.form.get("password", "") == pw:
+        session["authenticated"] = True
+        return redirect("/")
+    return render_template_string(PASSWORD_PAGE, error="Wrong password")
+
+
+@app.route("/logout")
+def logout():
+    session.pop("authenticated", None)
+    return redirect("/login")
+
+
 @app.route("/")
+@require_auth
 def home():
     cfg = load_config()
     api_key = cfg.get("api_key", "")
@@ -297,6 +444,7 @@ def home():
 
 
 @app.route("/callback")
+@require_auth
 def callback():
     request_token = request.args.get("request_token", "")
     if not request_token:
@@ -317,6 +465,7 @@ def callback():
 
 
 @app.route("/api/token", methods=["POST"])
+@require_auth
 def api_token():
     raw = request.form.get("redirect_url", "").strip()
     if not raw:
@@ -339,6 +488,7 @@ def api_token():
 
 
 @app.route("/api/start", methods=["POST"])
+@require_auth
 def api_start():
     strategy = request.form.get("strategy", "")
     if strategy not in STRATEGIES:
@@ -368,6 +518,7 @@ def api_start():
 
 
 @app.route("/api/stop", methods=["POST"])
+@require_auth
 def api_stop():
     strategy = request.form.get("strategy", "")
     if strategy not in STRATEGIES:
@@ -389,6 +540,7 @@ def api_stop():
 
 
 @app.route("/api/status")
+@require_auth
 def api_status():
     running = {}
     for s in STRATEGIES:
@@ -408,15 +560,26 @@ def api_status():
             token_ok = True
         except Exception:
             token_ok = False
+    positions = {}
+    if cfg.get("position"):
+        p = cfg["position"]
+        legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
+        positions["ic"] = {"expiry": p["expiry"], "entry_credit": p["entry_credit"], "legs": legs_info}
+    if cfg.get("cs_position"):
+        p = cfg["cs_position"]
+        legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
+        positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
     return jsonify({
         "strategies": running,
         "heartbeat": heartbeat,
         "token_ok": token_ok,
         "has_api_key": bool(api_key),
+        "positions": positions,
     })
 
 
 @app.route("/api/log")
+@require_auth
 def api_log():
     strategy = request.args.get("strategy", "ic")
     if strategy not in STRATEGIES:
@@ -426,21 +589,116 @@ def api_log():
     return jsonify({"output": out[-100:]})
 
 
-@app.route("/api/config", methods=["GET", "POST"])
-def api_config():
-    if request.method == "POST":
-        cfg = load_config()
-        if request.form.get("api_key"):
-            cfg["api_key"] = request.form["api_key"].strip()
-        if request.form.get("api_secret"):
-            cfg["api_secret"] = request.form["api_secret"].strip()
-        save_config(cfg)
-        return redirect("/?msg=success:API keys saved")
+_market_cache = {"data": None, "time": 0}
+
+def fetch_market_data(kite: KiteConnect) -> dict:
+    symbols = ["NSE:NIFTY 50", "BSE:SENSEX", "NSE:NIFTY BANK"]
+    result = {"nifty": {}, "sensex": {}, "banknifty": {}, "pcr": 0, "sentiment": "---", "ce_oi": 0, "pe_oi": 0, "time": ""}
+    try:
+        quotes = {}
+        for sym in symbols:
+            try:
+                q = kite.quote(sym)[sym]
+                quotes[sym] = q
+            except Exception:
+                continue
+        labels = {"NSE:NIFTY 50": "nifty", "BSE:SENSEX": "sensex", "NSE:NIFTY BANK": "banknifty"}
+        for sym, key in labels.items():
+            q = quotes.get(sym, {})
+            ohlc = q.get("ohlc", {})
+            ltp = q.get("last_price", 0)
+            net_chg = q.get("net_change", 0)
+            prev = ohlc.get("close", 0)
+            chg_pct = (net_chg / prev * 100) if prev else 0
+            result[key] = {
+                "spot": round(ltp, 2),
+                "open": round(ohlc.get("open", 0), 2),
+                "high": round(ohlc.get("high", 0), 2),
+                "low": round(ohlc.get("low", 0), 2),
+                "change": round(net_chg, 2),
+                "change_pct": round(chg_pct, 2),
+            }
+        # PCR / Sentiment
+        resp = kite.instruments("NFO")
+        nifty_opts = [r for r in resp if r.get("name") == "NIFTY" and r.get("instrument_type") in ("CE", "PE")]
+        if nifty_opts:
+            tsyms = [r["tradingsymbol"] for r in nifty_opts]
+            ce_oi = pe_oi = 0
+            for i in range(0, len(tsyms), 500):
+                batch = tsyms[i:i+500]
+                keys = [f"NFO:{s}" for s in batch]
+                batch_q = kite.quote(keys)
+                for k, v in batch_q.items():
+                    if v.get("oi") is None:
+                        continue
+                    sym = k.replace("NFO:", "")
+                    strikes = [r for r in nifty_opts if r["tradingsymbol"] == sym]
+                    if not strikes:
+                        continue
+                    if strikes[0]["instrument_type"] == "CE":
+                        ce_oi += v.get("oi", 0) or 0
+                    else:
+                        pe_oi += v.get("oi", 0) or 0
+            result["ce_oi"] = ce_oi
+            result["pe_oi"] = pe_oi
+            pcr = pe_oi / ce_oi if ce_oi else 0
+            result["pcr"] = round(pcr, 4)
+            if pcr > 1.2:
+                result["sentiment"] = "BEARISH"
+            elif pcr > 0.8:
+                result["sentiment"] = "NEUTRAL"
+            else:
+                result["sentiment"] = "BULLISH"
+        result["time"] = datetime.now().strftime("%H:%M:%S")
+    except Exception:
+        pass
+    return result
+
+
+@app.route("/api/market")
+@require_auth
+def api_market():
+    global _market_cache
+    now = time.time()
+    if now - _market_cache["time"] < 15 and _market_cache["data"]:
+        return jsonify(_market_cache["data"])
+    cfg = load_config()
+    api_key = cfg.get("api_key", "")
+    access_token = cfg.get("access_token", "")
+    if not api_key or not access_token:
+        return jsonify({"error": "Not authenticated"}), 401
+    try:
+        kite = KiteConnect(api_key=api_key, access_token=access_token, timeout=15)
+        data = fetch_market_data(kite)
+        _market_cache = {"data": data, "time": now}
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/config", methods=["GET"])
+def api_config_get():
     cfg = load_config()
     return jsonify({
         "api_key": cfg.get("api_key", ""),
         "has_token": bool(cfg.get("access_token", "")),
     })
+
+
+@app.route("/api/config", methods=["POST"])
+@require_auth
+def api_config_post():
+    cfg = load_config()
+    if request.form.get("api_key"):
+        cfg["api_key"] = request.form["api_key"].strip()
+    if request.form.get("api_secret"):
+        cfg["api_secret"] = request.form["api_secret"].strip()
+    dp = request.form.get("dashboard_password", "")
+    if dp:
+        cfg["dashboard_password"] = dp
+    save_config(cfg)
+    return redirect("/?msg=success:Settings saved")
+
 
 
 if __name__ == "__main__":
@@ -453,4 +711,4 @@ if __name__ == "__main__":
     print()
     print("Or use the manual token paste fallback on the dashboard.")
     print()
-    app.run(host=host, port=port, debug=True)
+    app.run(host=host, port=port, debug=os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true"))

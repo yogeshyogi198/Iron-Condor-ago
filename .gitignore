@@ -5,3 +5,4 @@ iron_condor_algo_reference.txt
 trade_log.csv
 __pycache__/
 *.pyc
+.env
