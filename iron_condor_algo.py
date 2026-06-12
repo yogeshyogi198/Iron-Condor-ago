@@ -991,7 +991,7 @@ class CreditSpreadManager:
                 continue
         return None
 
-    def _get_candles(self, token: int, lookback_hours: int = 55) -> list:
+    def _get_candles(self, token: int, lookback_hours: int = 300) -> list:
         to_dt = datetime.now()
         try:
             return self.kite.kite.historical_data(token, to_dt - timedelta(hours=lookback_hours), to_dt, CS_TIMEFRAME)
