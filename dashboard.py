@@ -248,7 +248,7 @@ PAGE = r"""<!DOCTYPE html>
     <div class="top-row">
       <div class="stat-box"><div class="label">Heartbeat</div><div class="value" id="s-heartbeat">---</div></div>
       <div class="stat-box"><div class="label">Token</div><div class="value" id="s-token">---</div></div>
-      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/8</div></div>
+      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/8</div><div style="font-size:1rem;color:#8b949e;margin-top:4px;" id="s-running-list"></div></div>
     </div>
   </div>
 
@@ -262,29 +262,29 @@ PAGE = r"""<!DOCTYPE html>
       <div class="stat-box" style="min-width:0;">
         <div class="label">NIFTY</div>
         <div class="value blue" style="font-size:1.5rem;" id="m-nifty-spot">---</div>
-        <div style="font-size:0.95rem;margin-top:4px;"><span id="m-nifty-chg"></span></div>
-        <div style="font-size:0.85rem;color:#8b949e;margin-top:2px;">O: <span id="m-nifty-open"></span> H: <span id="m-nifty-high"></span> L: <span id="m-nifty-low"></span></div>
-        <div style="font-size:0.85rem;color:#d29922;margin-top:2px;">Range: <span id="m-nifty-range"></span></div>
+        <div style="font-size:1.2rem;margin-top:6px;"><span id="m-nifty-chg"></span></div>
+        <div style="font-size:1.1rem;color:#8b949e;margin-top:4px;">O: <span id="m-nifty-open"></span> H: <span id="m-nifty-high"></span> L: <span id="m-nifty-low"></span></div>
+        <div style="font-size:1.1rem;color:#d29922;margin-top:4px;">Range: <span id="m-nifty-range"></span></div>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">SENSEX</div>
         <div class="value blue" style="font-size:1.5rem;" id="m-sensex-spot">---</div>
-        <div style="font-size:0.95rem;margin-top:4px;"><span id="m-sensex-chg"></span></div>
-        <div style="font-size:0.85rem;color:#8b949e;margin-top:2px;">O: <span id="m-sensex-open"></span> H: <span id="m-sensex-high"></span> L: <span id="m-sensex-low"></span></div>
-        <div style="font-size:0.85rem;color:#d29922;margin-top:2px;">Range: <span id="m-sensex-range"></span></div>
+        <div style="font-size:1.2rem;margin-top:6px;"><span id="m-sensex-chg"></span></div>
+        <div style="font-size:1.1rem;color:#8b949e;margin-top:4px;">O: <span id="m-sensex-open"></span> H: <span id="m-sensex-high"></span> L: <span id="m-sensex-low"></span></div>
+        <div style="font-size:1.1rem;color:#d29922;margin-top:4px;">Range: <span id="m-sensex-range"></span></div>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">BANK NIFTY</div>
         <div class="value blue" style="font-size:1.5rem;" id="m-banknifty-spot">---</div>
-        <div style="font-size:0.95rem;margin-top:4px;"><span id="m-banknifty-chg"></span></div>
-        <div style="font-size:0.85rem;color:#8b949e;margin-top:2px;">O: <span id="m-banknifty-open"></span> H: <span id="m-banknifty-high"></span> L: <span id="m-banknifty-low"></span></div>
-        <div style="font-size:0.85rem;color:#d29922;margin-top:2px;">Range: <span id="m-banknifty-range"></span></div>
+        <div style="font-size:1.2rem;margin-top:6px;"><span id="m-banknifty-chg"></span></div>
+        <div style="font-size:1.1rem;color:#8b949e;margin-top:4px;">O: <span id="m-banknifty-open"></span> H: <span id="m-banknifty-high"></span> L: <span id="m-banknifty-low"></span></div>
+        <div style="font-size:1.1rem;color:#d29922;margin-top:4px;">Range: <span id="m-banknifty-range"></span></div>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">SENTIMENT (PCR)</div>
         <div class="value" style="font-size:2.2rem;font-weight:800;" id="m-pcr">---</div>
         <div style="font-size:1.3rem;font-weight:700;margin-top:6px;" id="m-sentiment"></div>
-        <div style="font-size:0.85rem;color:#8b949e;margin-top:6px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
+        <div style="font-size:1rem;color:#8b949e;margin-top:6px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
       </div>
     </div>
   </div>
@@ -428,9 +428,10 @@ async function fetchStatus() {
     else if (d.token_ok === false) { tk.textContent = 'EXPIRED'; tk.className = 'value red'; }
     else { tk.textContent = '---'; tk.className = 'value'; }
     let count = 0;
+    var runningNames = [];
     for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr']) {
       const running = d.strategies && d.strategies[s];
-      if (running) count++;
+      if (running) { count++; runningNames.push(s.toUpperCase()); }
       const dot = $('dot-' + s);
       dot.className = 'dot ' + (running ? 'green' : 'red');
       $('s-' + s).textContent = running ? 'RUNNING' : 'STOPPED';
@@ -448,6 +449,7 @@ async function fetchStatus() {
       }
     }
     $('s-count').textContent = count + '/8';
+    $('s-running-list').textContent = runningNames.length ? runningNames.join(', ') : 'none';
   } catch(e) {}
 }
 setInterval(fetchStatus, 5000);
@@ -686,6 +688,11 @@ def api_stop():
         proc.kill()
         proc.wait()
     bot_processes[strategy] = None
+    cfg = load_config()
+    pos_key = {"ic": "position", "cs": "cs_position", "mt": "manual_trade"}.get(strategy)
+    if pos_key and cfg.get(pos_key):
+        cfg.pop(pos_key, None)
+        save_config(cfg)
     return jsonify({"ok": True, "strategy": strategy})
 
 
@@ -866,7 +873,7 @@ def api_trades():
     est_charge_per_leg = 50
     total_charges = closed["legs"] * est_charge_per_leg
 
-    # Running trades from config
+    # Running trades from config + dashboard processes
     cfg = load_config()
     running = 0
     running_details = []
@@ -874,6 +881,12 @@ def api_trades():
         if cfg.get(key):
             running += 1
             running_details.append(label)
+    for s, proc in bot_processes.items():
+        if proc and proc.poll() is None:
+            short = {"ic":"IC","cs":"CS","sma":"SMA","mt":"MT","bnf":"BNF","n1h":"N1H","sw":"SW","sr":"SR"}.get(s, s.upper())
+            if short not in running_details:
+                running += 1
+                running_details.append(short)
 
     return jsonify({
         "date": today,
