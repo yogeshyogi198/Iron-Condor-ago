@@ -1,10 +1,12 @@
 """
-Ratio Strategy — NIFTYBEES vs GOLDBEES (Turtle System 1)
-========================================================
+Ratio Strategy — NIFTYBEES vs GOLDBEES (Turtle System 1 + 2)
+=============================================================
 Run:  python ratio_strategy.py
 
 Checks daily at 15:31 IST for ratio breakouts.
-Entry/exit based on 20-day/10-day Turtle rules.
+- System 1 (20/10): 20-day entry, 10-day exit
+- System 2 (55/20): 55-day entry, 20-day exit
+Entry when either system signals. Exit uses the system that entered.
 """
 
 import json
@@ -28,8 +30,10 @@ NIFTYBEES_SYMBOL = "NIFTYBEES"
 GOLDBEES_SYMBOL = "GOLDBEES"
 LOOKBACK_DAYS = 90
 MIN_DATA_POINTS = 30
-ENTRY_WINDOW = 20
-EXIT_WINDOW = 10
+ENTRY_WINDOW_1 = 20
+EXIT_WINDOW_1 = 10
+ENTRY_WINDOW_2 = 55
+EXIT_WINDOW_2 = 20
 CHECK_HOUR = 15
 CHECK_MINUTE = 31
 LOOP_SLEEP = 60
@@ -47,7 +51,8 @@ def _load_state() -> dict:
             return json.loads(STATE_FILE.read_text())
         except (json.JSONDecodeError, ValueError):
             pass
-    return {"holding": None, "entry_date": "", "entry_price": 0, "quantity": 0}
+    return {"holding": None, "entry_date": "", "entry_price": 0,
+            "quantity": 0, "entry_system": None}
 
 
 def _save_state(state: dict):
@@ -145,45 +150,46 @@ def _place_cnc_order(kite: KiteConnect, symbol: str, qty: int,
         return False
 
 
-def _get_turtle_signals(close_n: list, close_g: list):
-    """Return (current_ratio, entry_high, entry_low, exit_high, exit_low)."""
-    ratios = [n / g for n, g in zip(close_n, close_g)]
-    current = ratios[-1]
-
-    entry = ratios[-ENTRY_WINDOW - 1:-1]
-    entry_high = max(entry) if entry else current
-    entry_low = min(entry) if entry else current
-
-    exit_ = ratios[-EXIT_WINDOW - 1:-1]
-    exit_high = max(exit_) if exit_ else current
-    exit_low = min(exit_) if exit_ else current
-
-    return current, entry_high, entry_low, exit_high, exit_low
+def _channel(ratios: list, window: int):
+    """Return (high, low) for the given lookback window."""
+    if len(ratios) < window + 1:
+        return ratios[-1], ratios[-1]
+    chunk = ratios[-window - 1:-1]
+    return max(chunk), min(chunk)
 
 
-def _send_report(current_ratio: float, entry_high: float, entry_low: float,
-                 exit_high: float, exit_low: float, state: dict, mode: str,
-                 signal: str = "", action_detail: str = ""):
+def _send_report(current_ratio: float, s1: dict, s2: dict,
+                 state: dict, mode: str, signal: str = "",
+                 action_detail: str = ""):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     holding = state.get("holding") or "None"
     qty = state.get("quantity", 0)
     entry_p = state.get("entry_price", 0)
+    sys_label = state.get("entry_system", "")
     lines = [
-        f"\U0001f504 RATIO STRATEGY",
+        "\U0001f504 RATIO STRATEGY",
         f"\U0001f4ca Ratio: {current_ratio:.4f}",
         f"\U0001f4c8 Holding: {holding}",
     ]
     if qty:
-        lines.append(f"\U0001f4b0 Qty: {qty} | Entry: \u20b9{entry_p:.2f}")
-    lines.append(f"20d High: {entry_high:.4f} | Low: {entry_low:.4f}")
-    lines.append(f"10d High: {exit_high:.4f} | Low: {exit_low:.4f}")
+        parts = [f"\U0001f4b0 Qty: {qty}"]
+        if entry_p:
+            parts.append(f"Entry: \u20b9{entry_p:.2f}")
+        if sys_label:
+            parts.append(f"System: {sys_label}")
+        lines.append(" | ".join(parts))
+    lines.append(f"S1 20d H:{s1['entry_high']:.4f} L:{s1['entry_low']:.4f}")
+    lines.append(f"S1 10d H:{s1['exit_high']:.4f} L:{s1['exit_low']:.4f}")
+    lines.append(f"S2 55d H:{s2['entry_high']:.4f} L:{s2['entry_low']:.4f}")
+    lines.append(f"S2 20d H:{s2['exit_high']:.4f} L:{s2['exit_low']:.4f}")
     if signal:
         lines.append(f"\u2757 Signal: {signal}")
     if action_detail:
         lines.append(f"\U0001f501 {action_detail}")
     lines.append(f"\u23f0 Time: {now_str}")
     lines.append(f"\U0001f4c4 Mode: {mode}")
-    telegram_logger.send_telegram("\n".join(lines), level="TRADE" if signal else "INFO")
+    telegram_logger.send_telegram("\n".join(lines),
+                                  level="TRADE" if signal else "INFO")
 
 
 def main():
@@ -200,7 +206,7 @@ def main():
     state = _load_state()
     mode_str = "PAPER" if paper_trade else "LIVE"
 
-    print(f"Ratio Strategy \u2014 Turtle System 1 ({mode_str} mode)")
+    print("Ratio Strategy \u2014 Turtle System 1 (20/10) + System 2 (55/20)")
     print("=" * 50)
     print(f"Current holding: {state['holding'] or 'None'}")
 
@@ -240,7 +246,7 @@ def main():
             return False
 
         close_n, close_g = _align_prices(ndata, gdata)
-        if len(close_n) < ENTRY_WINDOW + 1:
+        if len(close_n) < max(ENTRY_WINDOW_2, ENTRY_WINDOW_1) + 1:
             print(f"  Aligned data too short: {len(close_n)} days")
             return False
 
@@ -251,28 +257,43 @@ def main():
             return False
 
         current_ratio = n_ltp / g_ltp
-        _, entry_high, entry_low, exit_high, exit_low = \
-            _get_turtle_signals(close_n, close_g)
+        ratios = [n / g for n, g in zip(close_n, close_g)]
+
+        # Compute both systems
+        s1 = {}
+        s1["entry_high"], s1["entry_low"] = _channel(ratios, ENTRY_WINDOW_1)
+        s1["exit_high"], s1["exit_low"] = _channel(ratios, EXIT_WINDOW_1)
+
+        s2 = {}
+        s2["entry_high"], s2["entry_low"] = _channel(ratios, ENTRY_WINDOW_2)
+        s2["exit_high"], s2["exit_low"] = _channel(ratios, EXIT_WINDOW_2)
 
         print(f"  Ratio: {current_ratio:.4f}")
-        print(f"  20d High: {entry_high:.4f}  Low: {entry_low:.4f}")
-        print(f"  10d High: {exit_high:.4f}  Low: {exit_low:.4f}")
+        print(f"  S1 20d H:{s1['entry_high']:.4f} L:{s1['entry_low']:.4f}")
+        print(f"  S1 10d H:{s1['exit_high']:.4f} L:{s1['exit_low']:.4f}")
+        print(f"  S2 55d H:{s2['entry_high']:.4f} L:{s2['entry_low']:.4f}")
+        print(f"  S2 20d H:{s2['exit_high']:.4f} L:{s2['exit_low']:.4f}")
 
         if send_report_only:
-            _send_report(current_ratio, entry_high, entry_low,
-                         exit_high, exit_low, state, mode_str)
+            _send_report(current_ratio, s1, s2, state, mode_str)
             return True
 
-        # ── Exit check ──
+        # ── Exit check (use the system that entered) ──
         if state["holding"]:
+            sys_name = state.get("entry_system", "s1")
+            exit_channel = s1 if sys_name == "s1" else s2
             do_exit = False
             exit_reason = ""
-            if state["holding"] == NIFTYBEES_SYMBOL and current_ratio < exit_low:
+            if state["holding"] == NIFTYBEES_SYMBOL and \
+               current_ratio < exit_channel["exit_low"]:
                 do_exit = True
-                exit_reason = "ratio < 10-day lowest"
-            elif state["holding"] == GOLDBEES_SYMBOL and current_ratio > exit_high:
+                w = EXIT_WINDOW_1 if sys_name == "s1" else EXIT_WINDOW_2
+                exit_reason = f"ratio < {w}-day lowest"
+            elif state["holding"] == GOLDBEES_SYMBOL and \
+                 current_ratio > exit_channel["exit_high"]:
                 do_exit = True
-                exit_reason = "ratio > 10-day highest"
+                w = EXIT_WINDOW_1 if sys_name == "s1" else EXIT_WINDOW_2
+                exit_reason = f"ratio > {w}-day highest"
 
             if do_exit:
                 sell_symbol = state["holding"]
@@ -285,30 +306,46 @@ def main():
                 ltp_sold = n_ltp if sell_symbol == NIFTYBEES_SYMBOL else g_ltp
                 pnl = round((ltp_sold - state["entry_price"]) * qty, 2)
 
-                _send_report(current_ratio, entry_high, entry_low,
-                             exit_high, exit_low, state, mode_str,
-                             signal=f"EXIT {sell_symbol}",
-                             action_detail=f"Reason: {exit_reason} | "
+                _send_report(current_ratio, s1, s2, state, mode_str,
+                             signal=f"EXIT {sell_symbol} ({sys_name})",
+                             action_detail=f"{exit_reason} | "
                              f"P&L: \u20b9{pnl:+,.2f}")
 
                 state = {"holding": None, "entry_date": "",
-                         "entry_price": 0, "quantity": 0}
+                         "entry_price": 0, "quantity": 0,
+                         "entry_system": None}
                 _save_state(state)
                 print("  Position closed. Waiting for next entry...\n")
                 return True
 
-        # ── Entry check ──
+        # ── Entry check (either system) ──
         if not state["holding"]:
             signal = None
-            if current_ratio > entry_high:
+            entry_system = None
+            buy_symbol = None
+            sell_symbol = None
+
+            if current_ratio > s1["entry_high"]:
                 signal = "BUY_NIFTYBEES"
-            elif current_ratio < entry_low:
+                entry_system = "s1"
+            elif current_ratio < s1["entry_low"]:
                 signal = "BUY_GOLDBEES"
+                entry_system = "s1"
+
+            if not signal:
+                if current_ratio > s2["entry_high"]:
+                    signal = "BUY_NIFTYBEES"
+                    entry_system = "s2"
+                elif current_ratio < s2["entry_low"]:
+                    signal = "BUY_GOLDBEES"
+                    entry_system = "s2"
 
             if signal:
-                buy_symbol = (NIFTYBEES_SYMBOL if signal == "BUY_NIFTYBEES"
+                buy_symbol = (NIFTYBEES_SYMBOL
+                              if signal == "BUY_NIFTYBEES"
                               else GOLDBEES_SYMBOL)
-                sell_symbol = (GOLDBEES_SYMBOL if signal == "BUY_NIFTYBEES"
+                sell_symbol = (GOLDBEES_SYMBOL
+                               if signal == "BUY_NIFTYBEES"
                                else NIFTYBEES_SYMBOL)
 
                 margin = _get_available_margin(kite)
@@ -335,21 +372,23 @@ def main():
                     "entry_date": now.strftime("%Y-%m-%d"),
                     "entry_price": buy_ltp,
                     "quantity": qty,
+                    "entry_system": entry_system,
                 }
                 _save_state(state)
 
-                action_str = f"Sell {sell_symbol} \u2192 Buy {buy_symbol}"
-                _send_report(current_ratio, entry_high, entry_low,
-                             exit_high, exit_low, state, mode_str,
+                w = f"S1(20)" if entry_system == "s1" else f"S2(55)"
+                action_str = f"Sell {sell_symbol} \u2192 Buy {buy_symbol} [{w}]"
+                _send_report(current_ratio, s1, s2, state, mode_str,
                              signal=signal, action_detail=action_str)
-                print(f"  ENTERED: {buy_symbol} x {qty} @ \u20b9{buy_ltp:.2f}")
+                print(f"  ENTERED: {buy_symbol} x {qty} @ "
+                      f"\u20b9{buy_ltp:.2f} [{w}]")
                 return True
             else:
-                print(f"  No entry signal. Ratio within {entry_low:.4f} "
-                      f"- {entry_high:.4f} range.")
+                print("  No signal. Ratio within both channels.")
         else:
+            sys_name = state.get("entry_system", "s1")
             print(f"  Holding: {state['holding']} x {state['quantity']} "
-                  f"(@ \u20b9{state['entry_price']:.2f})")
+                  f"(@ \u20b9{state['entry_price']:.2f}) [{sys_name}]")
         return False
 
     try:
