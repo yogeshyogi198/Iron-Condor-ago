@@ -325,8 +325,10 @@ MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
 def is_market_open() -> bool:
-    now = datetime.now().time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 class KiteSession:
     def __init__(self, static_id: str = ""):

@@ -43,8 +43,10 @@ def _load_config() -> dict:
 
 
 def is_market_open() -> bool:
-    now = datetime.now().time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 def _load_alerts_today() -> set:

@@ -127,24 +127,24 @@ PAGE = r"""<!DOCTYPE html>
 <title>Trading Bot Dashboard</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 28px; font-size: 22px; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 30px; font-size: 28px; }
   .container { max-width: 100%; margin: 0 auto; }
-  h1 { color: #58a6ff; font-size: 2.4rem; margin-bottom: 28px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-  h1 small { font-size: 1rem; color: #8b949e; font-weight: 400; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; margin-bottom: 24px; }
-  .strategy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
-  .strat { background: #0d1117; border: 1px solid #30363d; border-radius: 12px; padding: 22px; display: flex; flex-direction: column; gap: 14px; }
-  .strat .name { font-size: 1.4rem; font-weight: 700; color: #58a6ff; }
-  .strat .status { font-size: 1.1rem; }
-  .strat .status .dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 8px; }
+  h1 { color: #58a6ff; font-size: 3rem; margin-bottom: 28px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 small { font-size: 1.3rem; color: #8b949e; font-weight: 400; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 30px; margin-bottom: 28px; }
+  .strategy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .strat { background: #0d1117; border: 1px solid #30363d; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .strat .name { font-size: 1.8rem; font-weight: 700; color: #58a6ff; }
+  .strat .status { font-size: 1.4rem; }
+  .strat .status .dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; margin-right: 8px; }
   .strat .status .dot.green { background: #3fb950; }
   .strat .status .dot.red { background: #f85149; }
   .strat .status .dot.gray { background: #484f58; }
   .strat .btn-row { display: flex; gap: 12px; }
   .strat .btn-row .btn { flex: 1; }
-  .strat .mini-log { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.9rem; max-height: 250px; overflow-y: auto; line-height: 1.6; color: #8b949e; }
+  .strat .mini-log { background: #0d1117; border: 1px solid #21262d; border-radius: 10px; padding: 14px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 1.2rem; max-height: 300px; overflow-y: auto; line-height: 1.6; color: #8b949e; }
   .strat .mini-log .hl { color: #c9d1d9; }
-  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 14px 28px; border: none; border-radius: 10px; font-size: 1.1rem; font-weight: 600; cursor: pointer; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 16px 32px; border: none; border-radius: 12px; font-size: 1.4rem; font-weight: 600; cursor: pointer; }
   .btn-primary { background: #238636; color: #fff; }
   .btn-primary:hover { background: #2ea043; }
   .btn-primary:disabled { background: #1b5e2a; opacity: 0.5; cursor: not-allowed; }
@@ -181,41 +181,42 @@ PAGE = r"""<!DOCTYPE html>
   .text-xs { font-size: 0.95rem; color: #8b949e; }
   /* ── Tablet ── */
   @media (max-width: 1024px) {
-    body { padding: 16px; font-size: 18px; }
-    .strategy-grid { grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    body { padding: 18px; font-size: 22px; }
+    .strategy-grid { grid-template-columns: repeat(2, 1fr); gap: 18px; }
     .top-row .stat-box { min-width: 120px; padding: 12px 20px; }
-    .top-row .stat-box .value { font-size: 1.3rem; }
-    .card { padding: 20px; }
-    .tab-bar button { padding: 10px 18px; font-size: 0.95rem; }
-    h1 { font-size: 1.8rem; }
-    .strat .name { font-size: 1.2rem; }
-    .btn { padding: 12px 20px; font-size: 1rem; }
+    .top-row .stat-box .value { font-size: 1.5rem; }
+    .card { padding: 22px; }
+    .tab-bar button { padding: 12px 20px; font-size: 1.1rem; }
+    h1 { font-size: 2.2rem; }
+    .strat .name { font-size: 1.5rem; }
+    .btn { padding: 14px 24px; font-size: 1.2rem; }
+    .strat .mini-log { font-size: 1rem; }
   }
   /* ── Mobile ── */
   @media (max-width: 768px) {
-    body { padding: 10px; font-size: 15px; }
+    body { padding: 12px; font-size: 18px; }
     .container { padding: 0; }
-    h1 { font-size: 1.4rem; margin-bottom: 16px; gap: 8px; }
-    h1 small { font-size: 0.8rem; }
-    .card { padding: 12px; margin-bottom: 12px; border-radius: 10px; }
-    .strategy-grid { grid-template-columns: 1fr; gap: 12px; }
-    .strat { padding: 14px; gap: 10px; }
-    .strat .name { font-size: 1rem; }
-    .strat .status { font-size: 0.85rem; }
-    .strat .status .dot { width: 10px; height: 10px; }
+    h1 { font-size: 1.8rem; margin-bottom: 16px; gap: 8px; }
+    h1 small { font-size: 0.9rem; }
+    .card { padding: 14px; margin-bottom: 14px; border-radius: 12px; }
+    .strategy-grid { grid-template-columns: 1fr; gap: 14px; }
+    .strat { padding: 16px; gap: 12px; }
+    .strat .name { font-size: 1.3rem; }
+    .strat .status { font-size: 1rem; }
+    .strat .status .dot { width: 12px; height: 12px; }
     .strat .btn-row { gap: 8px; flex-wrap: wrap; }
-    .strat .btn-row .btn { flex: 1; min-width: 80px; padding: 10px 12px; font-size: 0.85rem; }
-    .strat .mini-log { font-size: 0.65rem; max-height: 120px; padding: 8px; }
+    .strat .btn-row .btn { flex: 1; min-width: 80px; padding: 12px 14px; font-size: 1rem; }
+    .strat .mini-log { font-size: 0.8rem; max-height: 150px; padding: 10px; }
     .top-row { gap: 8px; margin-bottom: 12px; }
     .top-row .stat-box { min-width: 80px; padding: 8px 10px; border-radius: 8px; flex: 1; }
-    .top-row .stat-box .label { font-size: 0.65rem; }
-    .top-row .stat-box .value { font-size: 1rem; margin-top: 4px; }
+    .top-row .stat-box .label { font-size: 0.75rem; }
+    .top-row .stat-box .value { font-size: 1.2rem; margin-top: 4px; }
     .tab-bar { gap: 4px; overflow-x: auto; }
-    .tab-bar button { padding: 8px 14px; font-size: 0.8rem; white-space: nowrap; }
-    .btn { padding: 10px 16px; font-size: 0.85rem; border-radius: 8px; }
+    .tab-bar button { padding: 8px 14px; font-size: 0.85rem; white-space: nowrap; }
+    .btn { padding: 10px 16px; font-size: 0.9rem; border-radius: 8px; }
     input { padding: 10px 14px; font-size: 0.9rem; }
     .msg { padding: 12px 14px; font-size: 0.9rem; }
-    .text-xs { font-size: 0.75rem; }
+    .text-xs { font-size: 0.8rem; }
     .lots-row input { width: 50px !important; font-size: 0.85rem !important; }
   }
   /* ── Market data & summary grid responsive ── */
@@ -260,26 +261,29 @@ PAGE = r"""<!DOCTYPE html>
     <div class="grid-4">
       <div class="stat-box" style="min-width:0;">
         <div class="label">NIFTY</div>
-        <div class="value blue" style="font-size:1.3rem;" id="m-nifty-spot">---</div>
-        <div style="font-size:0.85rem;margin-top:4px;"><span id="m-nifty-chg"></span></div>
-        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">O: <span id="m-nifty-open"></span> H: <span id="m-nifty-high"></span> L: <span id="m-nifty-low"></span></div>
+        <div class="value blue" style="font-size:1.5rem;" id="m-nifty-spot">---</div>
+        <div style="font-size:0.95rem;margin-top:4px;"><span id="m-nifty-chg"></span></div>
+        <div style="font-size:0.85rem;color:#8b949e;margin-top:2px;">O: <span id="m-nifty-open"></span> H: <span id="m-nifty-high"></span> L: <span id="m-nifty-low"></span></div>
+        <div style="font-size:0.85rem;color:#d29922;margin-top:2px;">Range: <span id="m-nifty-range"></span></div>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">SENSEX</div>
-        <div class="value blue" style="font-size:1.3rem;" id="m-sensex-spot">---</div>
-        <div style="font-size:0.85rem;margin-top:4px;"><span id="m-sensex-chg"></span></div>
-        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">O: <span id="m-sensex-open"></span> H: <span id="m-sensex-high"></span> L: <span id="m-sensex-low"></span></div>
+        <div class="value blue" style="font-size:1.5rem;" id="m-sensex-spot">---</div>
+        <div style="font-size:0.95rem;margin-top:4px;"><span id="m-sensex-chg"></span></div>
+        <div style="font-size:0.85rem;color:#8b949e;margin-top:2px;">O: <span id="m-sensex-open"></span> H: <span id="m-sensex-high"></span> L: <span id="m-sensex-low"></span></div>
+        <div style="font-size:0.85rem;color:#d29922;margin-top:2px;">Range: <span id="m-sensex-range"></span></div>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">BANK NIFTY</div>
-        <div class="value blue" style="font-size:1.3rem;" id="m-banknifty-spot">---</div>
-        <div style="font-size:0.85rem;margin-top:4px;"><span id="m-banknifty-chg"></span></div>
-        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">O: <span id="m-banknifty-open"></span> H: <span id="m-banknifty-high"></span> L: <span id="m-banknifty-low"></span></div>
+        <div class="value blue" style="font-size:1.5rem;" id="m-banknifty-spot">---</div>
+        <div style="font-size:0.95rem;margin-top:4px;"><span id="m-banknifty-chg"></span></div>
+        <div style="font-size:0.85rem;color:#8b949e;margin-top:2px;">O: <span id="m-banknifty-open"></span> H: <span id="m-banknifty-high"></span> L: <span id="m-banknifty-low"></span></div>
+        <div style="font-size:0.85rem;color:#d29922;margin-top:2px;">Range: <span id="m-banknifty-range"></span></div>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">SENTIMENT (PCR)</div>
-        <div class="value" style="font-size:2rem;font-weight:800;" id="m-pcr">---</div>
-        <div style="font-size:1.2rem;font-weight:700;margin-top:6px;" id="m-sentiment"></div>
+        <div class="value" style="font-size:2.2rem;font-weight:800;" id="m-pcr">---</div>
+        <div style="font-size:1.3rem;font-weight:700;margin-top:6px;" id="m-sentiment"></div>
         <div style="font-size:0.85rem;color:#8b949e;margin-top:6px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
       </div>
     </div>
@@ -346,6 +350,7 @@ PAGE = r"""<!DOCTYPE html>
         if (el) el.style.display = 'none';
       }
     });
+  </script>
 
   <!-- Settings tabs -->
   <div class="card">
@@ -474,12 +479,13 @@ async function fetchMarket() {
       const spotEl = $('m-' + prefix + '-spot');
       spotEl.textContent = v.spot.toLocaleString('en-IN', {minimumFractionDigits:2});
       spotEl.className = 'value ' + (v.change >= 0 ? 'green' : 'red');
-      spotEl.style.fontSize = '1.3rem';
       $('m-' + prefix + '-chg').textContent = (v.change >= 0 ? '+' : '') + v.change.toFixed(2) + ' (' + (v.change_pct >= 0 ? '+' : '') + v.change_pct.toFixed(2) + '%)';
       $('m-' + prefix + '-chg').style.color = v.change >= 0 ? '#3fb950' : '#f85149';
       $('m-' + prefix + '-open').textContent = v.open.toLocaleString('en-IN', {minimumFractionDigits:2});
       $('m-' + prefix + '-high').textContent = v.high.toLocaleString('en-IN', {minimumFractionDigits:2});
       $('m-' + prefix + '-low').textContent = v.low.toLocaleString('en-IN', {minimumFractionDigits:2});
+      var range = v.high - v.low;
+      $('m-' + prefix + '-range').textContent = range.toLocaleString('en-IN', {minimumFractionDigits:2}) + ' pts';
     }
     if (d.pcr) {
       $('m-pcr').textContent = d.pcr.toFixed(2);

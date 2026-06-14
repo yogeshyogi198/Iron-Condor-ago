@@ -162,13 +162,13 @@ def main():
             print(f"  ERROR fetching NSE instruments: {e}")
             sys.exit(1)
     print(f"  Universe: {len(symbols)} stocks")
-    telegram_logger.send_telegram(
-        f"📊 SWING SCAN started — {len(symbols)} stocks, "
-        f"{len(token_map)} tokens available", level="INFO")
 
     print("  Building token map ...")
     token_map = _build_token_map(kite)
     print(f"  Found {len(token_map)} NSE equity tokens")
+    telegram_logger.send_telegram(
+        f"📊 SWING SCAN started — {len(symbols)} stocks, "
+        f"{len(token_map)} tokens available", level="INFO")
 
     qualified = []
     errors = 0
