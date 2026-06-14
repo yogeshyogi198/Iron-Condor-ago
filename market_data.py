@@ -116,12 +116,18 @@ def main():
             print(f"    CE OI Chg:       {ce_oi_change:>+15,}")
             print(f"    PE OI Chg:       {pe_oi_change:>+15,}")
 
-            if pcr > 1.2:
-                sentiment = "BEARISH (higher put OI - put writing)"
-            elif pcr > 0.8:
-                sentiment = "NEUTRAL"
+            if pcr > 1.3:
+                sentiment = "STRONG BULLISH"
+            elif pcr > 1.15:
+                sentiment = "BULLISH"
+            elif pcr > 1.0:
+                sentiment = "WEAK BULLISH"
+            elif pcr > 0.85:
+                sentiment = "WEAK BEARISH"
+            elif pcr > 0.7:
+                sentiment = "BEARISH"
             else:
-                sentiment = "BULLISH (higher call OI - call writing)"
+                sentiment = "STRONG BEARISH"
             print(f"    Sentiment:       {sentiment}")
     except Exception as e:
         print(f"    Error: {e}")

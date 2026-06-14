@@ -24,6 +24,29 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, time as dtime
 from typing import Optional
 
+# ── Console formatting (ANSI bold/bright for Windows Terminal / PowerShell) ──
+BOLD = "\033[1m"
+BRIGHT = "\033[93m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+CYAN = "\033[96m"
+RESET = "\033[0m"
+
+def bold(s: str) -> str:
+    return f"{BOLD}{s}{RESET}"
+
+def bright(s: str) -> str:
+    return f"{BRIGHT}{s}{RESET}"
+
+def green(s: str) -> str:
+    return f"{GREEN}{s}{RESET}"
+
+def red(s: str) -> str:
+    return f"{RED}{s}{RESET}"
+
+def cyan(s: str) -> str:
+    return f"{CYAN}{s}{RESET}"
+
 import requests
 from kiteconnect import KiteConnect
 
@@ -53,8 +76,47 @@ TRADE_LOG = os.path.join(os.path.dirname(__file__), "trade_log.csv")
 TRADE_LOG_FIELDS = [
     "date", "strategy", "expiry", "entry_time", "exit_time",
     "entry_spot", "exit_spot", "entry_credit", "exit_value",
-    "pnl", "max_profit_target", "stop_loss", "exit_reason",
+    "pnl", "charges", "max_profit_target", "stop_loss", "exit_reason",
 ]
+
+def calc_charges(legs: list, lot_size: int, exchange: str = "NFO") -> float:
+    """
+    Exact Zerodha charges for options trade.
+    Brokerage: ₹20 per order (each leg is one order)
+    STT: 0.05% on sell premium value (sell side only)
+    Transaction: NSE ₹50.5/crore or BSE ₹37.5/crore on total premium turnover
+    SEBI: ₹10/crore on total premium turnover
+    GST: 18% on (brokerage + transaction + SEBI)
+    Stamp duty: ~0.002% of premium turnover
+    """
+    orders = len(legs)
+    brokerage = orders * 20.0
+
+    total_premium_turnover = 0.0
+    sell_premium_value = 0.0
+
+    for leg in legs:
+        prem = float(leg.get("premium", 0))
+        action = leg.get("action", "")
+        value = prem * lot_size
+        total_premium_turnover += value
+        if action == "SELL":
+            sell_premium_value += value
+
+    stt = sell_premium_value * 0.0005  # 0.05% on sell side
+
+    rate_per_crore = 50.5 if exchange == "NFO" else 37.5
+    turnover_cr = total_premium_turnover / 1_00_00_000
+    transaction_charge = turnover_cr * rate_per_crore
+
+    sebi = turnover_cr * 10.0
+
+    stamp = total_premium_turnover * 0.00002  # 0.002%
+
+    gst = (brokerage + transaction_charge + sebi) * 0.18
+
+    total = brokerage + stt + transaction_charge + sebi + stamp + gst
+    return round(total, 2)
 
 def _lock_file_for(strategy: str) -> str:
     return os.path.join(os.path.dirname(__file__), f".bot_lock_{strategy}")
@@ -789,6 +851,9 @@ class IronCondorManager:
         self.entry_time = datetime.now().isoformat()
         self.entry_spot = ic.spot
         self._order_ids = order_ids
+        # Notify: strategy + legs punched
+        legs_dict = [asdict(l) for l in ic.legs]
+        telegram_logger.strategy_entry_alert("IRON CONDOR", legs_dict)
         return True
 
     def verify_fills(self) -> bool:
@@ -904,6 +969,7 @@ class IronCondorManager:
             except Exception as e:
                 print(f"  ✗ {leg.tradingsymbol}: {e}")
         pnl = (self.entry_credit - current) * LOT_SIZE
+        charges = calc_charges([asdict(l) for l in self.position.legs], LOT_SIZE)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
             "strategy": "IC",
@@ -915,6 +981,7 @@ class IronCondorManager:
             "entry_credit": round(self.entry_credit, 2),
             "exit_value": round(current, 2),
             "pnl": round(pnl, 2),
+            "charges": charges,
             "max_profit_target": PROFIT_TARGET_RS,
             "stop_loss": round(self.entry_credit * LOT_SIZE, 2),
             "exit_reason": reason,
@@ -1119,6 +1186,8 @@ class CreditSpreadManager:
         self.entry_time = datetime.now().isoformat()
         self.entry_spot = cs.spot
         self._order_ids = order_ids
+        legs_dict = [asdict(l) for l in cs.legs]
+        telegram_logger.strategy_entry_alert(f"CS {cs.spread_type}", legs_dict)
         return True
 
     def _square_off(self, legs: list[CreditSpreadLeg], order_ids: dict = {}):
@@ -1248,12 +1317,13 @@ class CreditSpreadManager:
 # ---------------------------------------------------------------------------
 
 class SmaCrossover:
-    def __init__(self, kite: KiteSession):
+    def __init__(self, kite: KiteSession, lots: int = 1):
         self.kite = kite
+        self.lots = lots
         self.trades_today = 0
         self.session1_done = False
         self.session2_done = False
-        self.trade = None  # {side, entry_ts, entry_price, sl, target_level, qty, tsym, strike, oid}
+        self.trades = []  # list of trade dicts: {side, entry_ts, entry_price, sl, target_level, qty, tsym, strike, oid, entry_prem, entry_sl, expiry}
 
     def _get_index_token(self) -> Optional[int]:
         """Find SENSEX index instrument token for historical data."""
@@ -1354,14 +1424,16 @@ class SmaCrossover:
                             "qty": qty, "expiry": best_exp}
         return best
 
-    def _is_trade_active(self) -> bool:
-        """Check if trade still has open positions."""
-        if not self.trade:
-            return False
+    def _is_trade_active(self, trade: dict = None) -> bool:
+        if trade is not None:
+            return self._trade_has_position(trade)
+        return any(self._trade_has_position(t) for t in self.trades)
+
+    def _trade_has_position(self, trade: dict) -> bool:
         try:
             positions = self.kite.kite.positions()["day"]
             for p in positions:
-                if p.get("tradingsymbol") == self.trade["tsym"] and p.get("quantity", 0) != 0:
+                if p.get("tradingsymbol") == trade["tsym"] and p.get("quantity", 0) != 0:
                     return True
         except Exception:
             pass
@@ -1373,40 +1445,38 @@ class SmaCrossover:
     def _in_session2(self, now: datetime) -> bool:
         return (now.hour == 13) or (now.hour == 14 and now.minute <= 30)
 
-    def _manage_trade(self):
-        if not self.trade:
-            return
+    def _manage_trades(self):
         spot = self._get_sensex_spot()
         if spot is None:
             return
-        side = self.trade["side"]
-        entry_price = self.trade["entry_price"]
-        sl = self.trade["sl"]
-        target_level = self.trade["target_level"]
-        points = abs(spot - entry_price)
+        to_remove = []
+        for trade in self.trades:
+            side = trade["side"]
+            entry_price = trade["entry_price"]
+            sl = trade["sl"]
+            target_level = trade["target_level"]
+            points = abs(spot - entry_price)
+            is_buy = (side == "CE")
+            if (is_buy and spot <= sl) or (not is_buy and spot >= sl):
+                print(f"  SL hit {trade['tsym']} @ {spot:.2f}, closing")
+                self._exit_trade(trade)
+                to_remove.append(trade)
+            else:
+                risk = abs(entry_price - trade["entry_sl"])
+                rr = points / risk if risk > 0 else 0
+                if rr >= target_level + 1:
+                    new_sl = entry_price + (target_level + 1) * risk if is_buy else entry_price - (target_level + 1) * risk
+                    if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
+                        trade["sl"] = new_sl
+                        trade["target_level"] = target_level + 1
+                        print(f"  Trail {trade['tsym']} SL to {new_sl:.2f} (RR {target_level+1}:1)")
+        for t in to_remove:
+            if t in self.trades:
+                self.trades.remove(t)
 
-        is_buy = (side == "CE")
-        if is_buy and spot <= sl:
-            print(f"  SL hit @ {spot:.2f}, closing")
-            self._exit_trade()
-        elif not is_buy and spot >= sl:
-            print(f"  SL hit @ {spot:.2f}, closing")
-            self._exit_trade()
-        else:
-            risk = abs(entry_price - self.trade["entry_sl"])
-            rr = points / risk if risk > 0 else 0
-            if rr >= target_level + 1:
-                new_sl = entry_price + (target_level + 1) * risk if is_buy else entry_price - (target_level + 1) * risk
-                if (is_buy and new_sl > self.trade["sl"]) or (not is_buy and new_sl < self.trade["sl"]):
-                    self.trade["sl"] = new_sl
-                    self.trade["target_level"] = target_level + 1
-                    print(f"  Trail SL to {new_sl:.2f} (RR {target_level+1}:1)")
-
-    def _exit_trade(self):
-        if not self.trade:
-            return
-        tsym = self.trade["tsym"]
-        qty = self.trade["qty"]
+    def _exit_trade(self, trade: dict):
+        tsym = trade["tsym"]
+        qty = trade["qty"]
         exit_spot = self._get_sensex_spot() or 0
         try:
             ltp = self.kite.kite.ltp(f"{SENSEX_EXCHANGE}:{tsym}")
@@ -1414,28 +1484,31 @@ class SmaCrossover:
         except Exception:
             exit_prem = 0
         try:
-            self.kite.place_market(tsym, "BUY" if self.trade["side"] == "PE" else "SELL", qty, exchange=SENSEX_EXCHANGE)
+            self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=SENSEX_EXCHANGE)
             print(f"  Closed {tsym}")
         except Exception as e:
             print(f"  Close error: {e}")
-        entry_prem = self.trade.get("entry_prem", 0)
-        pnl = (entry_prem - exit_prem) * qty if self.trade["side"] == "CE" else (exit_prem - entry_prem) * qty
+        entry_prem = trade.get("entry_prem", 0)
+        pnl = (entry_prem - exit_prem) * qty if trade["side"] == "CE" else (exit_prem - entry_prem) * qty
+        charges = calc_charges([{"action": "BUY", "premium": entry_prem}], qty, exchange=SENSEX_EXCHANGE)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "strategy": f"SMA_{self.trade['side']}",
-            "expiry": self.trade.get("expiry", ""),
-            "entry_time": self.trade.get("entry_ts", ""),
+            "strategy": f"SMA_{trade['side']}",
+            "expiry": trade.get("expiry", ""),
+            "entry_time": trade.get("entry_ts", ""),
             "exit_time": datetime.now().isoformat(),
-            "entry_spot": round(self.trade.get("entry_price", 0), 2),
+            "entry_spot": round(trade.get("entry_price", 0), 2),
             "exit_spot": round(exit_spot, 2),
             "entry_credit": round(entry_prem, 2),
             "exit_value": round(exit_prem, 2),
             "pnl": round(pnl, 2),
+            "charges": charges,
             "max_profit_target": 0,
             "stop_loss": 0,
-            "exit_reason": "SL_HIT" if self.trade.get("sl") else "CLOSED",
+            "exit_reason": "SL_HIT" if trade.get("sl") else "CLOSED",
         })
-        self.trade = None
+        if trade in self.trades:
+            self.trades.remove(trade)
 
     def _wait_for_crossover(self, session_name: str, timeout_minutes: int = 120) -> bool:
         """Monitor for SMA crossover during session window. Returns True if trade entered."""
@@ -1461,12 +1534,12 @@ class SmaCrossover:
 
             candles = self._get_3min_candles(token)
             if len(candles) < SMA_PERIOD:
-                time.sleep(10)
+                time.sleep(5)
                 continue
 
             sma = self._calc_sma(candles, SMA_PERIOD)
             if sma is None:
-                time.sleep(10)
+                time.sleep(5)
                 continue
 
             current_price = candles[-1]["close"]
@@ -1474,7 +1547,7 @@ class SmaCrossover:
             prev_sma = self._calc_sma(candles[:-1], SMA_PERIOD) if len(candles) > SMA_PERIOD else sma
 
             if prev_sma is None:
-                time.sleep(10)
+                time.sleep(5)
                 continue
 
             # Detect crossover
@@ -1482,7 +1555,7 @@ class SmaCrossover:
             prev_above = prev_price > prev_sma
             spot = self._get_sensex_spot()
             if spot is None:
-                time.sleep(10)
+                time.sleep(5)
                 continue
 
             if price_above and not prev_above:
@@ -1499,7 +1572,7 @@ class SmaCrossover:
                 last_cross = "PE"
 
             monitor_ip_status(self.kite)
-            time.sleep(10)
+            time.sleep(5)
 
     def _enter_trade(self, opt: dict, side: str, entry_candle: dict) -> bool:
         side_str = "BUY"
@@ -1508,7 +1581,7 @@ class SmaCrossover:
             return False
 
         tsym = opt["tsym"]
-        qty = opt["qty"]
+        qty = opt["qty"] * self.lots
 
         # SL at entry candle low (CE) or high (PE)
         if side == "CE":
@@ -1537,7 +1610,7 @@ class SmaCrossover:
             print(f"  ✗ {tsym}: {e}")
             return False
 
-        self.trade = {
+        trade = {
             "side": side,
             "entry_price": entry_price,
             "entry_sl": entry_sl,
@@ -1550,12 +1623,47 @@ class SmaCrossover:
             "entry_ts": datetime.now().isoformat(),
             "entry_prem": entry_prem,
         }
+        self.trades.append(trade)
         self.trades_today += 1
+        telegram_logger.strategy_entry_alert("SMA CROSSOVER", [{
+            "action": "BUY",
+            "tradingsymbol": tsym,
+            "strike": opt["strike"],
+            "option_type": side,
+            "premium": entry_prem,
+        }])
         return True
 
     def run(self):
-        """Main SMA crossover loop."""
+        """Main SMA crossover loop — supports multiple concurrent trades."""
         print(f"SMA Crossover — {SMA_TIMEFRAME} SMA{SMA_PERIOD}")
+
+        # Check for carryover positions at startup
+        try:
+            positions = self.kite.kite.positions()["day"]
+            for p in positions:
+                tsym = p.get("tradingsymbol", "")
+                qty = p.get("quantity", 0)
+                if qty and "SENSEX" in tsym and p.get("exchange") == SENSEX_EXCHANGE:
+                    otype = "CE" if qty > 0 else "PE"
+                    trade = {
+                        "side": otype,
+                        "entry_price": self._get_sensex_spot() or 0,
+                        "entry_sl": 0,
+                        "sl": 0,
+                        "target_level": 1.0,
+                        "qty": abs(qty),
+                        "tsym": tsym,
+                        "strike": float(p.get("strike_price", 0)),
+                        "expiry": (p.get("expiry_date", "") or "")[:10],
+                        "entry_ts": datetime.now().isoformat(),
+                        "entry_prem": 0,
+                    }
+                    self.trades.append(trade)
+                    self.trades_today += 1
+                    print(f"  Carryover trade detected: {tsym} x {abs(qty)}")
+        except Exception:
+            pass
 
         while True:
             monitor_ip_status(self.kite)
@@ -1563,28 +1671,38 @@ class SmaCrossover:
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
 
-            # If past Session 1 window (11:30), mark it done so Session 2 isn't locked out
+            active_count = sum(1 for t in self.trades if self._trade_has_position(t))
+            session1_can_enter = self.trades_today < 1 and active_count < 1
+            session2_can_enter = self.trades_today < 2 and active_count < 2
+
+            # If past Session 1 window (11:30), mark it done
             if not self.session1_done and (now.hour > 11 or (now.hour == 11 and now.minute > 30)):
                 self.session1_done = True
 
-            # Session 1: 9:30-11:30
-            if not self.session1_done and self._in_session1(now) and self.trades_today < 1:
+            # Session 1: 9:30-11:30 (only if no carryover trade active)
+            if session1_can_enter and not self.session1_done and self._in_session1(now):
                 if self._wait_for_crossover("S1"):
                     self.session1_done = True
 
-            if not self.session2_done and self._in_session2(now) and self.session1_done and self.trades_today < 2:
+            # Session 2: 1:00-2:30
+            if session2_can_enter and not self.session2_done and self._in_session2(now) and self.session1_done:
                 if self._wait_for_crossover("S2"):
                     self.session2_done = True
 
-            # Manage existing trade
-            if self.trade:
-                self._manage_trade()
+            # Manage all active trades — trail SL for all
+            if self.trades:
+                self._manage_trades()
 
-            if not self._is_trade_active() and self.trade:
-                self.trade = None
+            # Cleanup dead trades (position closed externally)
+            self.trades = [t for t in self.trades if self._trade_has_position(t)]
 
-            # If past Session 2 window and nothing to do, wait for next day
-            if self.session1_done and not self.trade and (now.hour > 14 or (now.hour == 14 and now.minute > 30)):
+            # If any trade still active, fast loop
+            if self.trades:
+                time.sleep(5)
+                continue
+
+            # If past Session 2 and nothing active, wait for next day
+            if not self.trades and (now.hour > 14 or (now.hour == 14 and now.minute > 30)):
                 next_day = (now + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
                 wait = (next_day - now).total_seconds()
                 time.sleep(min(wait, 3600))
@@ -1592,7 +1710,7 @@ class SmaCrossover:
                 self.session1_done = False
                 self.session2_done = False
 
-            if self.trades_today >= 2:
+            if self.trades_today >= 2 and not self.trades:
                 next_day = (now + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
                 wait = (next_day - now).total_seconds()
                 time.sleep(min(wait, 3600))
@@ -1600,7 +1718,884 @@ class SmaCrossover:
                 self.session1_done = False
                 self.session2_done = False
 
-            time.sleep(60)
+            time.sleep(10)
+
+
+# ---------------------------------------------------------------------------
+# SMA Crossover Strategy — BANK NIFTY (2-hour resampled from 60-min candles)
+# ---------------------------------------------------------------------------
+
+class SmaCrossoverBNF:
+    """BANK NIFTY SMA crossover: resample two 60-min → 2hr candle, SMA(60) on 2hr."""
+
+    BNF_EXCHANGE = "NFO"
+    BNF_NAME = "BANKNIFTY"
+    BNF_STRIKE_GAP = 100
+    BNF_RAW_TIMEFRAME = "60minute"
+    BNF_PERIOD = 60
+    BNF_DEFAULT_LOT = 15
+    BNF_INDEX_SYMBOLS = ["NSE:NIFTY BANK", "NSE:BANKNIFTY"]
+
+    def __init__(self, kite: KiteSession, lots: int = 1):
+        self.kite = kite
+        self.lots = lots
+        self.trades_today = 0
+        self.trades = []  # list of trade dicts
+
+    def _get_index_token(self) -> Optional[int]:
+        """Find BANK NIFTY index instrument token for historical data."""
+        for exchange in ("NSE", "BSE"):
+            try:
+                for row in self.kite.kite.instruments(exchange):
+                    tsym = row.get("tradingsymbol", "")
+                    exch = row.get("exchange", "")
+                    name = row.get("name", "")
+                    if name == "NIFTY BANK" and exch == exchange:
+                        return int(row["instrument_token"])
+                    if tsym in ("NIFTY BANK", "BANKNIFTY") and exch == exchange:
+                        return int(row["instrument_token"])
+            except Exception:
+                continue
+        return None
+
+    def _get_bnf_spot(self) -> Optional[float]:
+        for sym in self.BNF_INDEX_SYMBOLS:
+            try:
+                return self.kite.kite.ltp(sym)[sym]["last_price"]
+            except Exception:
+                continue
+        return None
+
+    def _get_60min_candles(self, token: int, lookback_days: int = 14) -> list:
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=lookback_days)
+        try:
+            return self.kite.kite.historical_data(token, from_dt, to_dt, self.BNF_RAW_TIMEFRAME)
+        except Exception as e:
+            print(f"  Hist data error: {e}")
+            return []
+
+    def _resample_2hr(self, candles: list) -> list:
+        """Pair consecutive 60-min candles into 2-hour OHLC candles."""
+        result = []
+        for i in range(0, len(candles) - 1, 2):
+            c1, c2 = candles[i], candles[i + 1]
+            result.append({
+                "date": c2["date"] if "date" in c2 else c2.get("time", c2.get("timestamp", "")),
+                "open": c1["open"],
+                "high": max(c1["high"], c2["high"]),
+                "low": min(c1["low"], c2["low"]),
+                "close": c2["close"],
+            })
+        return result
+
+    def _calc_sma(self, candles: list, period: int) -> Optional[float]:
+        if len(candles) < period:
+            return None
+        closes = [c["close"] for c in candles[-period:]]
+        return sum(closes) / period
+
+    def _get_bnf_instruments(self, expiry: str) -> list[dict]:
+        self.kite._fetch_instruments()
+        return [
+            r for r in self.kite._instruments
+            if r["exchange"] == self.BNF_EXCHANGE
+            and r["name"] == self.BNF_NAME
+            and r["instrument_type"] in ("CE", "PE")
+            and r["expiry"] == expiry
+        ]
+
+    def _get_nearest_expiry(self, instruments: list[dict]) -> Optional[str]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        seen = set()
+        best = None
+        best_diff = 999
+        for row in instruments:
+            exp = row["expiry"]
+            if exp in seen:
+                continue
+            seen.add(exp)
+            if exp == today:
+                return exp
+            exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+            diff = (exp_date - datetime.now().date()).days
+            if 0 <= diff < best_diff:
+                best_diff = diff
+                best = exp
+        return best
+
+    def _get_atm_option(self, spot: float, is_ce: bool) -> Optional[dict]:
+        atm = round(spot / self.BNF_STRIKE_GAP) * self.BNF_STRIKE_GAP
+        self.kite._fetch_instruments()
+        s_exps = set()
+        for r in self.kite._instruments:
+            if r["exchange"] == self.BNF_EXCHANGE and r["name"] == self.BNF_NAME:
+                s_exps.add(r["expiry"])
+        if not s_exps:
+            print("  No BANKNIFTY expiry found")
+            return None
+        today = datetime.now().strftime("%Y-%m-%d")
+        best_exp = min(s_exps, key=lambda e: abs((datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days) if e >= today else 999)
+        opts = self._get_bnf_instruments(best_exp)
+        otype = "CE" if is_ce else "PE"
+        best = None
+        best_diff = 999999
+        for r in opts:
+            if r["instrument_type"] == otype:
+                d = abs(float(r["strike"]) - atm)
+                if d < best_diff:
+                    best_diff = d
+                    qty = int(r.get("lot_size", self.BNF_DEFAULT_LOT))
+                    best = {"tsym": r["tradingsymbol"], "strike": float(r["strike"]),
+                            "qty": qty, "expiry": best_exp}
+        return best
+
+    def _trade_has_position(self, trade: dict) -> bool:
+        try:
+            positions = self.kite.kite.positions()["day"]
+            for p in positions:
+                if p.get("tradingsymbol") == trade["tsym"] and p.get("quantity", 0) != 0:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _is_trade_active(self, trade: dict = None) -> bool:
+        if trade is not None:
+            return self._trade_has_position(trade)
+        return any(self._trade_has_position(t) for t in self.trades)
+
+    def _in_session(self, now: datetime) -> bool:
+        # Check during market hours when 1hr candles are forming
+        return now.hour >= 9 and (now.hour < 15 or (now.hour == 15 and now.minute <= 30))
+
+    def _manage_trades(self):
+        spot = self._get_bnf_spot()
+        if spot is None:
+            return
+        to_remove = []
+        for trade in self.trades:
+            side = trade["side"]
+            entry_price = trade["entry_price"]
+            sl = trade["sl"]
+            target_level = trade["target_level"]
+            points = abs(spot - entry_price)
+            is_buy = (side == "CE")
+            if (is_buy and spot <= sl) or (not is_buy and spot >= sl):
+                print(f"  SL hit {trade['tsym']} @ {spot:.2f}, closing")
+                self._exit_trade(trade)
+                to_remove.append(trade)
+            else:
+                risk = abs(entry_price - trade["entry_sl"])
+                rr = points / risk if risk > 0 else 0
+                if rr >= target_level + 1:
+                    new_sl = entry_price + (target_level + 1) * risk if is_buy else entry_price - (target_level + 1) * risk
+                    if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
+                        trade["sl"] = new_sl
+                        trade["target_level"] = target_level + 1
+                        print(f"  Trail {trade['tsym']} SL to {new_sl:.2f} (RR {target_level+1}:1)")
+        for t in to_remove:
+            if t in self.trades:
+                self.trades.remove(t)
+
+    def _exit_trade(self, trade: dict):
+        tsym = trade["tsym"]
+        qty = trade["qty"]
+        exit_spot = self._get_bnf_spot() or 0
+        try:
+            ltp = self.kite.kite.ltp(f"{self.BNF_EXCHANGE}:{tsym}")
+            exit_prem = ltp.get(f"{self.BNF_EXCHANGE}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            exit_prem = 0
+        try:
+            self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=self.BNF_EXCHANGE)
+            print(f"  Closed {tsym}")
+        except Exception as e:
+            print(f"  Close error: {e}")
+        entry_prem = trade.get("entry_prem", 0)
+        pnl = (entry_prem - exit_prem) * qty if trade["side"] == "CE" else (exit_prem - entry_prem) * qty
+        charges = calc_charges([{"action": "BUY", "premium": entry_prem}], qty, exchange=self.BNF_EXCHANGE)
+        append_trade_log({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "strategy": f"BNF_SMA_{trade['side']}",
+            "expiry": trade.get("expiry", ""),
+            "entry_time": trade.get("entry_ts", ""),
+            "exit_time": datetime.now().isoformat(),
+            "entry_spot": round(trade.get("entry_price", 0), 2),
+            "exit_spot": round(exit_spot, 2),
+            "entry_credit": round(entry_prem, 2),
+            "exit_value": round(exit_prem, 2),
+            "pnl": round(pnl, 2),
+            "charges": charges,
+            "max_profit_target": 0,
+            "stop_loss": 0,
+            "exit_reason": "SL_HIT" if trade.get("sl") else "CLOSED",
+        })
+        exit_reason = "SL_HIT" if trade.get("sl") else "CLOSED"
+        telegram_logger.strategy_exit_alert(f"BNF SMA {trade['side']}", exit_reason, pnl)
+        if trade in self.trades:
+            self.trades.remove(trade)
+
+    def _wait_for_crossover(self, timeout_minutes: int = 150) -> bool:
+        """Monitor 2hr resampled SMA crossover (check every new 1hr candle)."""
+        token = self._get_index_token()
+        if not token:
+            print("  Could not find BANK NIFTY index token")
+            return False
+
+        print(f"  Watching 2hr SMA{self.BNF_PERIOD} crossover...")
+        start = datetime.now()
+        last_cross = None
+        last_candle_count = 0
+
+        while True:
+            now = datetime.now()
+            elapsed = (now - start).total_seconds() / 60
+            if elapsed > timeout_minutes:
+                return False
+
+            if not is_market_open():
+                time.sleep(60)
+                continue
+
+            raw = self._get_60min_candles(token)
+            if len(raw) < self.BNF_PERIOD * 2:
+                time.sleep(30)
+                continue
+
+            # Only act when a new 1hr candle has closed
+            if len(raw) == last_candle_count:
+                time.sleep(30)
+                continue
+            last_candle_count = len(raw)
+
+            two_hr = self._resample_2hr(raw)
+            if len(two_hr) < self.BNF_PERIOD:
+                time.sleep(30)
+                continue
+
+            sma = self._calc_sma(two_hr, self.BNF_PERIOD)
+            if sma is None:
+                time.sleep(30)
+                continue
+
+            current_candle = two_hr[-1]
+            prev_candle = two_hr[-2] if len(two_hr) > 1 else current_candle
+            prev_sma = self._calc_sma(two_hr[:-1], self.BNF_PERIOD) if len(two_hr) > self.BNF_PERIOD else sma
+
+            if prev_sma is None:
+                time.sleep(30)
+                continue
+
+            price_above = current_candle["close"] > sma
+            prev_above = prev_candle["close"] > prev_sma
+            spot = self._get_bnf_spot()
+            if spot is None:
+                time.sleep(30)
+                continue
+
+            if price_above and not prev_above:
+                if last_cross != "CE":
+                    opt = self._get_atm_option(spot, is_ce=True)
+                    if opt and self._enter_trade(opt, "CE", current_candle):
+                        return True
+                last_cross = "CE"
+            elif not price_above and prev_above:
+                if last_cross != "PE":
+                    opt = self._get_atm_option(spot, is_ce=False)
+                    if opt and self._enter_trade(opt, "PE", current_candle):
+                        return True
+                last_cross = "PE"
+
+            monitor_ip_status(self.kite)
+            time.sleep(30)
+
+    def _enter_trade(self, opt: dict, side: str, entry_candle: dict) -> bool:
+        side_str = "BUY"
+        entry_price = self._get_bnf_spot()
+        if entry_price is None:
+            return False
+
+        tsym = opt["tsym"]
+        qty = opt["qty"] * self.lots
+
+        if side == "CE":
+            sl = entry_candle["low"]
+            entry_sl = sl
+        else:
+            sl = entry_candle["high"]
+            entry_sl = sl
+
+        risk = abs(entry_price - sl)
+        target_price = entry_price + risk if side == "CE" else entry_price - risk
+
+        entry_prem = 0
+        try:
+            ltp = self.kite.kite.ltp(f"{self.BNF_EXCHANGE}:{tsym}")
+            entry_prem = ltp.get(f"{self.BNF_EXCHANGE}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            pass
+
+        try:
+            if is_market_open():
+                oid = self.kite.place_market(tsym, side_str, qty, exchange=self.BNF_EXCHANGE)
+            else:
+                oid = self.kite.place_limit(tsym, side_str, qty, entry_prem or 100, exchange=self.BNF_EXCHANGE)
+        except Exception as e:
+            print(f"  ✗ {tsym}: {e}")
+            return False
+
+        trade = {
+            "side": side,
+            "entry_price": entry_price,
+            "entry_sl": entry_sl,
+            "sl": sl,
+            "target_level": 1.0,
+            "qty": qty,
+            "tsym": tsym,
+            "strike": opt["strike"],
+            "expiry": opt["expiry"],
+            "entry_ts": datetime.now().isoformat(),
+            "entry_prem": entry_prem,
+        }
+        self.trades.append(trade)
+        self.trades_today += 1
+        telegram_logger.strategy_entry_alert("BNF SMA CROSSOVER", [{
+            "action": "BUY",
+            "tradingsymbol": tsym,
+            "strike": opt["strike"],
+            "option_type": side,
+            "premium": entry_prem,
+        }])
+        return True
+
+    def _next_market_open(self, now: datetime) -> datetime:
+        n = now + timedelta(days=1)
+        if now.weekday() >= 4:
+            n += timedelta(days=(7 - now.weekday()))
+        return n.replace(hour=9, minute=15, second=0, microsecond=0)
+
+    def _load_carryover_positions(self):
+        try:
+            positions = self.kite.kite.positions()["day"]
+            for p in positions:
+                tsym = p.get("tradingsymbol", "")
+                qty = p.get("quantity", 0)
+                if qty and "BANKNIFTY" in tsym and p.get("exchange") == self.BNF_EXCHANGE:
+                    otype = "CE" if qty > 0 else "PE"
+                    trade = {
+                        "side": otype,
+                        "entry_price": self._get_bnf_spot() or 0,
+                        "entry_sl": 0,
+                        "sl": 0,
+                        "target_level": 1.0,
+                        "qty": abs(qty),
+                        "tsym": tsym,
+                        "strike": float(p.get("strike_price", 0)),
+                        "expiry": (p.get("expiry_date", "") or "")[:10],
+                        "entry_ts": datetime.now().isoformat(),
+                        "entry_prem": 0,
+                    }
+                    self.trades.append(trade)
+                    self.trades_today += 1
+                    print(f"  Carryover trade detected: {tsym} x {abs(qty)}")
+        except Exception:
+            pass
+
+    def _check_crossover(self, last_candle_count: int):
+        """Non-blocking crossover check. Returns (new_candle_count, side or None)."""
+        token = self._get_index_token()
+        if not token:
+            return last_candle_count, None
+
+        raw = self._get_60min_candles(token)
+        if len(raw) < self.BNF_PERIOD * 2:
+            return last_candle_count, None
+
+        if len(raw) == last_candle_count:
+            return last_candle_count, None
+
+        two_hr = self._resample_2hr(raw)
+        if len(two_hr) < self.BNF_PERIOD:
+            return last_candle_count, None
+
+        sma = self._calc_sma(two_hr, self.BNF_PERIOD)
+        if sma is None:
+            return last_candle_count, None
+
+        prev_sma = self._calc_sma(two_hr[:-1], self.BNF_PERIOD) if len(two_hr) > self.BNF_PERIOD else sma
+        if prev_sma is None:
+            return last_candle_count, None
+
+        current_candle = two_hr[-1]
+        prev_candle = two_hr[-2] if len(two_hr) > 1 else current_candle
+
+        price_above = current_candle["close"] > sma
+        prev_above = prev_candle["close"] > prev_sma
+
+        side = None
+        if price_above and not prev_above:
+            side = "CE"
+        elif not price_above and prev_above:
+            side = "PE"
+
+        return len(raw), side
+
+    def run(self):
+        """Main SMA crossover loop — multiple concurrent trades."""
+        print(f"BNF SMA Crossover — 2hr resampled SMA{self.BNF_PERIOD}")
+
+        self._load_carryover_positions()
+
+        last_candle_count = 0
+        last_cross = None
+
+        while True:
+            monitor_ip_status(self.kite)
+            periodic_connection_test(self.kite)
+            now = datetime.now()
+
+            active_count = sum(1 for t in self.trades if self._trade_has_position(t))
+
+            # Single crossover check per loop (non-blocking)
+            if active_count < 2 and self._in_session(now):
+                cross_signal, side = self._check_crossover(last_candle_count)
+                if isinstance(cross_signal, int):
+                    last_candle_count = cross_signal
+                if side:
+                    spot = self._get_bnf_spot()
+                    if spot:
+                        opt = self._get_atm_option(spot, is_ce=(side == "CE"))
+                        if opt:
+                            candle = {"low": spot - 50, "high": spot + 50}  # fallback
+                            if self._enter_trade(opt, side, candle):
+                                last_cross = side
+
+            # Manage all active trades
+            if self.trades:
+                self._manage_trades()
+
+            self.trades = [t for t in self.trades if self._trade_has_position(t)]
+
+            if self.trades:
+                time.sleep(10)
+                continue
+
+            # Market closed — sleep until next market open
+            if not is_market_open():
+                next_open = self._next_market_open(now)
+                wait = (next_open - now).total_seconds()
+                time.sleep(min(wait, 3600))
+
+            time.sleep(10)
+
+# ---------------------------------------------------------------------------
+# NIFTY 1H SMA60 Options Strategy — Multi-Leg Condor with Adjustment
+# ---------------------------------------------------------------------------
+
+N1H_EXCHANGE = "NFO"
+N1H_NAME = "NIFTY"
+N1H_SPOT_SYMBOL = "NSE:NIFTY 50"
+N1H_TIMEFRAME = "60minute"
+N1H_PERIOD = 60
+N1H_STRIKE_GAP = 50
+N1H_LOT_DEFAULT = 25
+
+# Strike offsets from ATM
+N1H_BUY1_OFFSET = 250
+N1H_SELL1_OFFSET = 450
+N1H_SELL2_OFFSET = 650
+N1H_BUY2_OFFSET = 700
+
+# Adjustment: roll buy1 by this many points when locking
+N1H_LOCK_ROLL = 100  # e.g., ATM+250 → ATM+350 (bullish) / ATM-250 → ATM-350 (bearish)
+
+
+class NiftySMAOptions:
+    """Nifty 1H SMA60 crossover → 4-leg options structure with adjustment lock."""
+
+    def __init__(self, kite: KiteSession):
+        self.kite = kite
+        self.position: Optional[dict] = None  # position state
+        self.entry_time: str = ""
+        self.entry_spot: float = 0
+        self._order_ids: dict[str, str] = {}
+
+    # ── helpers ──────────────────────────────────────────────
+
+    def _get_index_token(self) -> Optional[int]:
+        for exchange in ("NSE", "BSE"):
+            try:
+                for row in self.kite.kite.instruments(exchange):
+                    tsym = row.get("tradingsymbol", "")
+                    if tsym in ("NIFTY 50", "NIFTY"):
+                        return int(row["instrument_token"])
+                    if "NIFTY" in tsym and row.get("instrument_type", "") == "":
+                        return int(row["instrument_token"])
+            except Exception:
+                continue
+        return None
+
+    def _get_60min_candles(self, token: int, lookback_days: int = 10) -> list:
+        to_dt = datetime.now()
+        try:
+            return self.kite.kite.historical_data(
+                token, to_dt - timedelta(days=lookback_days), to_dt, N1H_TIMEFRAME
+            )
+        except Exception as e:
+            print(f"  Hist data error: {e}")
+            return []
+
+    def _calc_sma(self, candles: list, period: int) -> Optional[float]:
+        if len(candles) < period:
+            return None
+        return sum(c["close"] for c in candles[-period:]) / period
+
+    def _round_strike(self, spot: float, offset: int, side: str) -> int:
+        """Round spot ± offset to nearest valid NIFTY strike (multiple of 50)."""
+        raw = (spot - offset) if side == "PE" else (spot + offset)
+        return int(round(raw / N1H_STRIKE_GAP) * N1H_STRIKE_GAP)
+
+    def _get_option_tsym(self, strike: int, otype: str, expiry: str) -> Optional[str]:
+        self.kite._fetch_instruments()
+        for r in self.kite._instruments:
+            if (r["exchange"] == N1H_EXCHANGE and r["name"] == N1H_NAME
+                    and r["expiry"] == expiry and r["instrument_type"] == otype
+                    and abs(float(r["strike"]) - strike) < 1):
+                return r["tradingsymbol"]
+        return None
+
+    def _get_option_premium(self, tsym: str) -> float:
+        try:
+            q = self.kite.kite.ltp(f"{N1H_EXCHANGE}:{tsym}")
+            return q.get(f"{N1H_EXCHANGE}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            return 0
+
+    def _get_atm(self) -> int:
+        spot = self.kite.get_nse_spot() or 0
+        return int(round(spot / N1H_STRIKE_GAP) * N1H_STRIKE_GAP)
+
+    def _side_from_crossover(self) -> Optional[str]:
+        """Check 1H SMA60 crossover. Returns 'CE' (bullish) or 'PE' (bearish) or None."""
+        token = self._get_index_token()
+        if not token:
+            return None
+        candles = self._get_60min_candles(token)
+        if len(candles) < N1H_PERIOD + 1:
+            return None
+        sma = self._calc_sma(candles, N1H_PERIOD)
+        prev_sma = self._calc_sma(candles[:-1], N1H_PERIOD)
+        if sma is None or prev_sma is None:
+            return None
+        cc = candles[-1]["close"]
+        pc = candles[-2]["close"]
+        above = cc > sma
+        prev_above = pc > prev_sma
+        if above and not prev_above:
+            return "CE"  # bullish
+        if not above and prev_above:
+            return "PE"  # bearish
+        return None
+
+    # ── build / enter ────────────────────────────────────────
+
+    def _build_legs(self, side: str, expiry: str) -> Optional[list[dict]]:
+        """Build 4-leg structure for given direction."""
+        atm = self._get_atm()
+        if side == "CE":
+            strikes = [
+                self._round_strike(atm, N1H_BUY1_OFFSET, "CE"),
+                self._round_strike(atm, N1H_SELL1_OFFSET, "CE"),
+                self._round_strike(atm, N1H_SELL2_OFFSET, "CE"),
+                self._round_strike(atm, N1H_BUY2_OFFSET, "CE"),
+            ]
+            actions = ["BUY", "SELL", "SELL", "BUY"]
+            otype = "CE"
+        else:
+            strikes = [
+                self._round_strike(atm, N1H_BUY1_OFFSET, "PE"),
+                self._round_strike(atm, N1H_SELL1_OFFSET, "PE"),
+                self._round_strike(atm, N1H_SELL2_OFFSET, "PE"),
+                self._round_strike(atm, N1H_BUY2_OFFSET, "PE"),
+            ]
+            actions = ["BUY", "SELL", "SELL", "BUY"]
+            otype = "PE"
+
+        legs = []
+        for strike, action in zip(strikes, actions):
+            tsym = self._get_option_tsym(strike, otype, expiry)
+            if not tsym:
+                print(f"  {red('✗ Strike')} {strike} {otype} not found for {expiry}")
+                return None
+            prem = self._get_option_premium(tsym)
+            legs.append({
+                "tsym": tsym, "strike": strike, "option_type": otype,
+                "action": action, "premium": prem, "exchange": N1H_EXCHANGE,
+                "expiry": expiry,
+            })
+        return legs
+
+    def _calc_max_loss(self, legs: list[dict]) -> float:
+        net = sum(-l["premium"] if l["action"] == "BUY" else l["premium"] for l in legs)
+        qty = self._get_qty(legs[0]["tsym"])
+        return max(0, net * qty)
+
+    def _get_qty(self, tsym: str) -> int:
+        """Read lot size for a given trading symbol."""
+        self.kite._fetch_instruments()
+        for r in self.kite._instruments:
+            if r["tradingsymbol"] == tsym:
+                return int(r.get("lot_size", N1H_LOT_DEFAULT))
+        return N1H_LOT_DEFAULT
+
+    def _enter(self, legs: list[dict]) -> bool:
+        """Place all legs. BUY first, then SELL if market open."""
+        qty = self._get_qty(legs[0]["tsym"])
+        print(f"\n{bold(green('ENTER'))} — {legs[0]['option_type']} ({qty} qty)")
+        buy_legs = [l for l in legs if l["action"] == "BUY"]
+        sell_legs = [l for l in legs if l["action"] == "SELL"]
+        oids: dict[str, str] = {}
+
+        for leg in buy_legs:
+            try:
+                oid = self.kite.place_market(leg["tsym"], "BUY", qty, exchange=N1H_EXCHANGE)
+                oids[leg["tsym"]] = oid
+                print(f"  {green('BUY')} {leg['tsym']} @ mkt")
+            except Exception as e:
+                print(f"  {red('✗ BUY')} {leg['tsym']}: {e}")
+                self._cancel_oids(oids)
+                return False
+
+        for leg in sell_legs:
+            try:
+                oid = self.kite.place_market(leg["tsym"], "SELL", qty, exchange=N1H_EXCHANGE)
+                oids[leg["tsym"]] = oid
+                print(f"  {red('SELL')} {leg['tsym']} @ mkt")
+            except Exception as e:
+                print(f"  {red('✗ SELL')} {leg['tsym']}: {e}")
+                self._cancel_oids(oids)
+                return False
+
+        self.position = {
+            "legs": legs, "side": legs[0]["option_type"],
+            "entry_spot": self.entry_spot, "entry_time": self.entry_time,
+            "entry_atm": int(round(self.entry_spot / N1H_STRIKE_GAP) * N1H_STRIKE_GAP),
+            "max_loss": self._calc_max_loss(legs),
+            "qty": qty,
+            "locked": False, "lock_level": 0,
+        }
+        self._order_ids = oids
+        telegram_logger.strategy_entry_alert("N1H OPTIONS", [{
+            "action": l["action"], "tradingsymbol": l["tsym"],
+            "strike": l["strike"], "option_type": l["option_type"],
+            "premium": l["premium"],
+        } for l in legs])
+        return True
+
+    def _cancel_oids(self, oids: dict):
+        for tsym, oid in oids.items():
+            try:
+                self.kite.kite.cancel_order("regular", oid)
+            except Exception:
+                try:
+                    self.kite.kite.cancel_order("amo", oid)
+                except Exception:
+                    pass
+
+    # ── monitor ──────────────────────────────────────────────
+
+    def _current_pnl(self) -> float:
+        if not self.position:
+            return 0
+        qty = self.position["qty"]
+        current = 0.0
+        for leg in self.position["legs"]:
+            prem = self._get_option_premium(leg["tsym"])
+            if leg["action"] == "SELL":
+                current += leg["premium"] - prem
+            else:
+                current += prem - leg["premium"]
+        return current * qty
+
+    def _adjust(self):
+        """Lock profit by rolling the primary buy leg (offset 250)."""
+        side = self.position["side"]
+        legs = self.position["legs"]
+        atm = self.position["entry_atm"]
+        qty = self.position["qty"]
+
+        # Identify the primary buy leg (buy1 at offset 250 from ATM)
+        buy1 = next((l for l in legs if l["action"] == "BUY"
+                     and abs(l["strike"] - atm) == N1H_BUY1_OFFSET), None)
+        if not buy1:
+            print(f"  {red('Could not identify buy1 leg for adjustment')}")
+            return
+
+        # Close the primary buy leg
+        try:
+            self.kite.place_market(buy1["tsym"],
+                                   "SELL" if buy1["action"] == "BUY" else "BUY",
+                                   qty, exchange=N1H_EXCHANGE)
+            print(f"  {green('Close')} {buy1['tsym']}")
+        except Exception as e:
+            print(f"  {red('Close error')}: {e}")
+
+        # Remove closed leg from tracking
+        legs.remove(buy1)
+
+        # Open new buy leg (closer to ATM by lock_roll)
+        new_offset = N1H_BUY1_OFFSET - N1H_LOCK_ROLL
+        new_strike = (atm + new_offset) if side == "CE" else (atm - new_offset)
+        new_strike = int(round(new_strike / N1H_STRIKE_GAP) * N1H_STRIKE_GAP)
+        expiry = buy1.get("expiry", "")
+        new_tsym = self._get_option_tsym(new_strike, side, expiry)
+        if new_tsym:
+            try:
+                self.kite.place_market(new_tsym, "BUY", qty, exchange=N1H_EXCHANGE)
+                print(f"  {green('BUY')} {new_tsym} (adjustment)")
+                legs.append({
+                    "tsym": new_tsym, "strike": new_strike, "option_type": side,
+                    "action": "BUY", "premium": 0, "exchange": N1H_EXCHANGE,
+                    "expiry": expiry,
+                })
+            except Exception as e:
+                print(f"  {red('Adjust error')}: {e}")
+
+        self.position["locked"] = True
+        self.position["lock_level"] = 1
+        print(f"  {bold(green('✅ Profit locked — zero loss achieved'))}")
+
+    # ── run ──────────────────────────────────────────────────
+
+    def run(self):
+        """Main loop: watch for crossover → enter → monitor → adjust → exit."""
+        print(f"{bold(cyan('NIFTY 1H SMA60 Options Strategy'))}")
+        last_candle_count = 0
+
+        while True:
+            monitor_ip_status(self.kite)
+            periodic_connection_test(self.kite)
+            now = datetime.now()
+
+            # ── ENTRY PHASE ──
+            if self.position is None:
+                if not is_market_open():
+                    next_open = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                    if now.weekday() >= 4:
+                        next_open += timedelta(days=(7 - now.weekday()))
+                    time.sleep(min((next_open - now).total_seconds(), 3600))
+                    continue
+
+                # Check for crossover (only when new 1H candle closes)
+                raw = self._get_60min_candles(self._get_index_token() or 0)
+                if len(raw) == last_candle_count or len(raw) < N1H_PERIOD + 1:
+                    time.sleep(15)
+                    continue
+                last_candle_count = len(raw)
+
+                side = self._side_from_crossover()
+                if side:
+                    print(f"  {bold(cyan('Crossover detected'))}: {side}")
+                    self.entry_spot = self.kite.get_nse_spot() or 0
+                    self.entry_time = now.isoformat()
+                    expiry = nearest_expiry_today(self.kite.get_option_instruments())
+                    if not expiry:
+                        print("  No expiry found")
+                        time.sleep(30)
+                        continue
+                    legs = self._build_legs(side, expiry)
+                    if legs and self._enter(legs):
+                        print(f"  {bold(green('Position entered'))}: {side}")
+                    else:
+                        print(f"  {red('Entry failed')}")
+                time.sleep(30)
+                continue
+
+            # ── MONITOR / ADJUST / EXIT PHASE ──
+            legs = self.position["legs"]
+            pnl = self._current_pnl()
+            max_loss = self.position["max_loss"]
+            side = self.position["side"]
+
+            # Market closed — sleep until next open, carry position forward
+            if not is_market_open():
+                next_open = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                if now.weekday() >= 4:
+                    next_open += timedelta(days=(7 - now.weekday()))
+                wait = min((next_open - now).total_seconds(), 3600)
+                print(f"  {bold('Market closed — carryover')}, sleep {wait:.0f}s")
+                time.sleep(wait)
+                continue
+
+            # Adjustment: when profit equals max loss
+            if not self.position["locked"] and pnl >= max_loss:
+                self._adjust()
+                # After lock, continue monitoring
+
+            # Trail after lock: 1:1, 1:2
+            if self.position.get("locked"):
+                lock_base = max_loss  # already recovered
+                extra = pnl - lock_base
+                if extra >= lock_base * 2:  # 1:2 RR
+                    self._exit("TARGET_1_2", pnl)
+                    continue
+                elif extra >= lock_base:  # 1:1 RR — partial trail
+                    if self.position.get("lock_level", 0) < 2:
+                        self.position["lock_level"] = 2
+                        print(f"  {bright('1:1 RR achieved — trailing')}")
+
+            # Hard stop: if P&L drops below -max_loss (unlikely after lock)
+            if pnl <= -max_loss:
+                self._exit("STOP_LOSS", pnl)
+                continue
+
+            time.sleep(10)
+
+    def _exit(self, reason: str, pnl: float):
+        if not self.position:
+            return
+        legs = self.position["legs"]
+        qty = self.position["qty"]
+        print(f"\n{bold(red('EXIT'))} ({reason}) — P&L ₹{pnl:+.2f}")
+        exit_spot = self.kite.get_nse_spot() or 0
+        current = 0.0
+        for leg in legs:
+            prem = self._get_option_premium(leg["tsym"])
+            if leg["action"] == "SELL":
+                current += leg["premium"] - prem
+            else:
+                current += prem - leg["premium"]
+            reverse = "BUY" if leg["action"] == "SELL" else "SELL"
+            try:
+                self.kite.place_market(leg["tsym"], reverse, qty, exchange=N1H_EXCHANGE)
+                print(f"  {red('Close')} {leg['tsym']}")
+            except Exception as e:
+                print(f"  {red('✗')} {leg['tsym']}: {e}")
+        charges = calc_charges(
+            [{"action": l["action"], "premium": l["premium"]} for l in legs],
+            qty, exchange=N1H_EXCHANGE,
+        )
+        append_trade_log({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "strategy": f"N1H_{self.position['side']}",
+            "expiry": next((l.get("expiry", "") for l in legs), ""),
+            "entry_time": self.position.get("entry_time", ""),
+            "exit_time": datetime.now().isoformat(),
+            "entry_spot": round(self.position.get("entry_spot", 0), 2),
+            "exit_spot": round(exit_spot, 2),
+            "entry_credit": round(sum(l["premium"] for l in legs if l["action"] == "SELL") -
+                                   sum(l["premium"] for l in legs if l["action"] == "BUY"), 2),
+            "exit_value": round(current, 2),
+            "pnl": round(pnl, 2),
+            "charges": charges,
+            "max_profit_target": 0,
+            "stop_loss": round(self.position.get("max_loss", 0), 2),
+            "exit_reason": reason,
+        })
+        telegram_logger.strategy_exit_alert("N1H OPTIONS", reason, pnl)
+        self.position = None
+        print("Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -1698,19 +2693,23 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                                 continue
                         target_str = "short premium ≤ ₹2" if ic.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{PROFIT_TARGET_RS} profit"
                         print(f"IC monitor ({target_str}, SL @ credit)")
-                        while True:
-                            monitor_ip_status(kite)
-                            if not kite.ensure_auth():
+                        try:
+                            while True:
+                                monitor_ip_status(kite)
+                                if not kite.ensure_auth():
+                                    time.sleep(60)
+                                    continue
                                 time.sleep(60)
-                                continue
-                            time.sleep(60)
-                            action = ic_manager.monitor()
-                            if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME"):
-                                ic_manager.exit(action)
-                                c = load_config()
-                                c.pop("position", None)
-                                save_config(c)
-                                return
+                                action = ic_manager.monitor()
+                                if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME"):
+                                    ic_manager.exit(action)
+                                    c = load_config()
+                                    c.pop("position", None)
+                                    save_config(c)
+                                    return
+                        except Exception as e:
+                            telegram_logger.error_alert("IC (CS fallback) Strategy", str(e))
+                            raise
                     else:
                         print("No IC either, retry CS...")
                 else:
@@ -1769,22 +2768,267 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
             break
 
     target_str = "short prem ≤ ₹2" if manager.position.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{CS_PROFIT_TARGET_RS} profit"
-    print(f"Monitoring every 60s. Target: {target_str}, SL at credit.")
-    while True:
-        monitor_ip_status(kite)
-        if not kite.ensure_auth():
-            time.sleep(60)
-            continue
-        time.sleep(60)
-        periodic_connection_test(kite)
-        action = manager.monitor()
-        if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME", "EXIT_REQUESTED"):
-            manager.exit(action)
-            c = load_config()
-            c.pop("cs_position", None)
-            save_config(c)
-            print("Done.")
+    print(f"Monitoring every 10s. Target: {target_str}, SL at credit.")
+    try:
+        while True:
+            monitor_ip_status(kite)
+            if not kite.ensure_auth():
+                time.sleep(10)
+                continue
+            time.sleep(10)
+            periodic_connection_test(kite)
+            action = manager.monitor()
+            if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME", "EXIT_REQUESTED"):
+                manager.exit(action)
+                c = load_config()
+                c.pop("cs_position", None)
+                save_config(c)
+                print("Done.")
+                return
+    except Exception as e:
+        telegram_logger.error_alert("Credit Spread Strategy", str(e))
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Manual Trade Manager — detect single-leg positions, trail SL
+# ---------------------------------------------------------------------------
+
+MT_CONFIG_KEY = "manual_trade"
+
+class ManualTradeManager:
+    def __init__(self, kite: KiteSession):
+        self.kite = kite
+        self.trade: dict | None = None
+
+    def detect_position(self) -> dict | None:
+        """Scan live Zerodha positions for single-leg manual trades."""
+        try:
+            positions = self.kite.kite.positions()["day"]
+        except Exception as e:
+            print(f"  Positions fetch error: {e}")
+            return None
+
+        # Exclude IC/CS multi-leg positions
+        nifty_option_tsyms = set()
+        for p in positions:
+            tsym = p.get("tradingsymbol", "")
+            if "NIFTY" in tsym and abs(p.get("quantity", 0)) > 0:
+                nifty_option_tsyms.add(tsym)
+
+        # Find the single leg (not part of any 2-leg or 4-leg strategy)
+        for p in positions:
+            tsym = p.get("tradingsymbol", "")
+            qty = p.get("quantity", 0)
+            if qty == 0:
+                continue
+            exchange = p.get("exchange", "")
+            if exchange not in ("NFO", "BFO"):
+                continue
+            strike = float(p.get("strike_price", 0))
+            otype = p.get("instrument_type", "")
+            if otype not in ("CE", "PE"):
+                continue
+            lot = abs(qty)
+            side = "BUY" if qty > 0 else "SELL"
+            expiry = (p.get("expiry_date", "") or "")[:10]
+            return {
+                "tsym": tsym,
+                "strike": strike,
+                "option_type": otype,
+                "side": side,
+                "qty": lot,
+                "exchange": exchange,
+                "expiry": expiry,
+                "entry_qty": qty,
+            }
+        return None
+
+    def init_from_config(self) -> bool:
+        """Load saved trade + SL from config."""
+        cfg = load_config()
+        saved = cfg.get(MT_CONFIG_KEY)
+        if not saved:
+            return False
+        self.trade = saved
+        print(f"  Resumed manual trade: {self.trade['tsym']} | SL @ {self.trade['sl']}")
+        return True
+
+    def save_to_config(self):
+        cfg = {**load_config(), MT_CONFIG_KEY: self.trade}
+        save_config(cfg)
+
+    def clear_config(self):
+        cfg = load_config()
+        cfg.pop(MT_CONFIG_KEY, None)
+        save_config(cfg)
+
+    def start(self, sl_points: float | None = None):
+        """Start monitoring a detected manual trade. User provides SL in points."""
+        pos = self.detect_position()
+        if not pos:
+            print("  No manual trade detected in Zerodha positions.")
+            return False
+
+        tsym = pos["tsym"]
+        # Get current premium
+        exchange = pos["exchange"]
+        try:
+            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
+            prem = ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            prem = 0
+
+        side = pos["side"]
+        otype = pos["option_type"]
+
+        if sl_points is None:
+            print(f"\n  Detected: {side} {tsym} x {pos['qty']} @ ₹{prem:.2f}")
+            print("  Enter SL in points (e.g. 50 for ₹50): ", end="")
+            try:
+                sl_points = float(input().strip())
+            except (ValueError, EOFError):
+                print("  Invalid, defaulting to 50 points")
+                sl_points = 50.0
+
+        entry_price = prem
+        is_buy = (side == "BUY")
+        sl_price = entry_price - sl_points if is_buy else entry_price + sl_points
+
+        self.trade = {
+            "tsym": tsym,
+            "strike": pos["strike"],
+            "option_type": otype,
+            "side": side,
+            "qty": pos["qty"],
+            "exchange": exchange,
+            "expiry": pos["expiry"],
+            "entry_price": entry_price,
+            "entry_sl": sl_price,
+            "sl": sl_price,
+            "target_level": 1.0,
+            "entry_ts": datetime.now().isoformat(),
+        }
+        self.save_to_config()
+        print(f"  Monitoring {side} {tsym} | Entry ₹{entry_price:.2f} | SL ₹{sl_price:.2f}")
+        return True
+
+    def monitor(self):
+        if not self.trade:
+            return "NO_TRADE"
+        tsym = self.trade["tsym"]
+        exchange = self.trade["exchange"]
+        try:
+            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
+            current_prem = ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            current_prem = 0
+
+        entry = self.trade["entry_price"]
+        sl = self.trade["sl"]
+        side = self.trade["side"]
+        is_buy = (side == "BUY")
+
+        # SL check
+        if is_buy and current_prem <= sl:
+            print(f"  SL hit @ ₹{current_prem:.2f}")
+            self.exit("SL_HIT")
+            return "EXIT_SL"
+        elif not is_buy and current_prem >= sl:
+            print(f"  SL hit @ ₹{current_prem:.2f}")
+            self.exit("SL_HIT")
+            return "EXIT_SL"
+
+        # Trail SL
+        points = abs(current_prem - entry)
+        risk = abs(entry - self.trade["entry_sl"])
+        target_level = self.trade["target_level"]
+        rr = points / risk if risk > 0 else 0
+
+        if rr >= target_level + 1:
+            if is_buy:
+                new_sl = entry + (target_level + 1) * risk
+            else:
+                new_sl = entry - (target_level + 1) * risk
+            if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
+                self.trade["sl"] = new_sl
+                self.trade["target_level"] = target_level + 1
+                self.save_to_config()
+                print(f"  Trail SL to ₹{new_sl:.2f} (RR {target_level+1}:1)")
+        return "HOLD"
+
+    def exit(self, reason: str):
+        if not self.trade:
             return
+        tsym = self.trade["tsym"]
+        qty = self.trade["qty"]
+        exchange = self.trade["exchange"]
+        side = self.trade["side"]
+
+        reverse = "SELL" if side == "BUY" else "BUY"
+        try:
+            self.kite.place_market(tsym, reverse, qty, exchange=exchange)
+            print(f"  Closed {tsym}")
+        except Exception as e:
+            print(f"  Close error: {e}")
+
+        try:
+            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
+            exit_prem = ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            exit_prem = 0
+
+        entry_prem = self.trade["entry_price"]
+        pnl = (exit_prem - entry_prem) * qty if side == "BUY" else (entry_prem - exit_prem) * qty
+        charges = calc_charges([{"action": side, "premium": entry_prem}], qty, exchange=self.trade.get("exchange", "NFO"))
+        append_trade_log({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "strategy": f"MT_{self.trade['option_type']}",
+            "expiry": self.trade.get("expiry", ""),
+            "entry_time": self.trade.get("entry_ts", ""),
+            "exit_time": datetime.now().isoformat(),
+            "entry_spot": round(entry_prem, 2),
+            "exit_spot": round(exit_prem, 2),
+            "entry_credit": round(entry_prem if side == "SELL" else 0, 2),
+            "exit_value": round(exit_prem, 2),
+            "pnl": round(pnl, 2),
+            "charges": charges,
+            "max_profit_target": 0,
+            "stop_loss": round(self.trade.get("entry_sl", 0), 2),
+            "exit_reason": reason,
+        })
+        self.clear_config()
+        self.trade = None
+
+
+def _run_manual_trade(kite: KiteSession, args):
+    manager = ManualTradeManager(kite)
+
+    # Try resume from config
+    if args.resume and manager.init_from_config():
+        pass
+    elif manager.init_from_config():
+        print("  Saved manual trade found. Resuming...")
+    else:
+        ok = manager.start()
+        if not ok:
+            return
+
+    print("  Monitoring every 60s. Trailing SL active.")
+    try:
+        while True:
+            monitor_ip_status(kite)
+            if not kite.ensure_auth():
+                time.sleep(60)
+                continue
+            time.sleep(10)
+            action = manager.monitor()
+            if action in ("EXIT_SL",):
+                print("Done.")
+                return
+    except Exception as e:
+        telegram_logger.error_alert("Manual Trade", str(e))
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1865,10 +3109,14 @@ def main():
     parser.add_argument("--login", action="store_true", help="Login to Zerodha")
     parser.add_argument("--resume", action="store_true", help="Scan live Zerodha positions and monitor")
     parser.add_argument("--test-ip", action="store_true", help="Test if whitelisted IP works via dummy order")
-    parser.add_argument("--strategy", choices=["ic", "sma", "cs"], default="ic",
-                        help="Strategy: ic (Iron Condor), cs (Credit Spread), or sma (SMA Crossover)")
+    parser.add_argument("--strategy", choices=["ic", "sma", "cs", "mt", "bnf", "n1h"], default="ic",
+                        help="Strategy: ic (Iron Condor), cs (Credit Spread), sma (SMA Crossover), bnf (Bank Nifty SMA), n1h (Nifty 1H SMA Options)")
+    parser.add_argument("--lots", type=int, default=1, help="Lot multiplier (e.g. 2 = 2x lot quantity)")
     args = parser.parse_args()
     init_trade_log()
+
+    global LOT_SIZE
+    LOT_SIZE = 65 * args.lots
 
     get_public_ip_v4()
     get_local_ipv6()
@@ -1926,14 +3174,48 @@ def main():
         return
 
     # Strategy dispatch
+    if args.strategy == "mt":
+        try:
+            _run_manual_trade(kite, args)
+        except Exception as e:
+            telegram_logger.error_alert("Manual Trade Strategy", str(e))
+            raise
+        return
+
+    if args.strategy == "bnf":
+        bnf = SmaCrossoverBNF(kite, lots=args.lots)
+        try:
+            bnf.run()
+        except Exception as e:
+            telegram_logger.error_alert("BNF SMA Strategy", str(e))
+            raise
+        return
+
+    if args.strategy == "n1h":
+        n1h = NiftySMAOptions(kite)
+        try:
+            n1h.run()
+        except Exception as e:
+            telegram_logger.error_alert("N1H Options Strategy", str(e))
+            raise
+        return
+
     if args.strategy == "sma":
-        sma = SmaCrossover(kite)
-        sma.run()
+        sma = SmaCrossover(kite, lots=args.lots)
+        try:
+            sma.run()
+        except Exception as e:
+            telegram_logger.error_alert("SMA Strategy", str(e))
+            raise
         return
 
     if args.strategy == "cs":
         manager = CreditSpreadManager(kite)
-        _run_credit_spread(kite, manager, args)
+        try:
+            _run_credit_spread(kite, manager, args)
+        except Exception as e:
+            telegram_logger.error_alert("Credit Spread Strategy", str(e))
+            raise
         return
 
     manager = IronCondorManager(kite)
@@ -2042,21 +3324,25 @@ def main():
 
     target_str = "short premium ≤ ₹2" if ic.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{PROFIT_TARGET_RS} profit"
     print(f"Monitoring ({target_str}, SL @ credit)")
-    while True:
-        monitor_ip_status(kite)
-        if not kite.ensure_auth():
-            time.sleep(60)
-            continue
-        time.sleep(60)
-        periodic_connection_test(kite)
-        action = manager.monitor()
-        if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME"):
-            manager.exit(action)
-            c = load_config()
-            c.pop("position", None)
-            save_config(c)
-            print("Done.")
-            return
+    try:
+        while True:
+            monitor_ip_status(kite)
+            if not kite.ensure_auth():
+                time.sleep(60)
+                continue
+            time.sleep(10)
+            periodic_connection_test(kite)
+            action = manager.monitor()
+            if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME"):
+                manager.exit(action)
+                c = load_config()
+                c.pop("position", None)
+                save_config(c)
+                print("Done.")
+                return
+    except Exception as e:
+        telegram_logger.error_alert("IC Strategy", str(e))
+        raise
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 from functools import wraps
 from pathlib import Path
 
@@ -32,8 +33,9 @@ load_dotenv()
 BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
 HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
+TRADE_LOG = BOT_DIR / "trade_log.csv"
 
-STRATEGIES = ["ic", "cs", "sma"]
+STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sw", "sr"]
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -110,6 +112,11 @@ STRATEGY_LABELS = {
     "ic": "Iron Condor (NIFTY)",
     "cs": "Credit Spread (NIFTY)",
     "sma": "SMA Crossover (SENSEX)",
+    "mt": "Manual Trade (Trail SL)",
+    "sw": "Swing Scanner (Weekly)",
+    "sr": "Swing Rebalancer (Daily)",
+    "bnf": "Bank Nifty 2H SMA(60)",
+    "n1h": "Nifty 1H SMA Options",
 }
 
 PAGE = r"""<!DOCTYPE html>
@@ -230,27 +237,74 @@ PAGE = r"""<!DOCTYPE html>
       </div>
       <div class="stat-box" style="min-width:0;">
         <div class="label">SENTIMENT (PCR)</div>
-        <div class="value" style="font-size:1.5rem;" id="m-pcr">---</div>
-        <div style="font-size:0.85rem;margin-top:4px;" id="m-sentiment"></div>
-        <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
+        <div class="value" style="font-size:2rem;font-weight:800;" id="m-pcr">---</div>
+        <div style="font-size:1.2rem;font-weight:700;margin-top:6px;" id="m-sentiment"></div>
+        <div style="font-size:0.85rem;color:#8b949e;margin-top:6px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Today's Summary card -->
+  <div class="card">
+    <div class="top-row" style="margin-bottom:8px;">
+      <div style="font-size:1.1rem;font-weight:700;color:#58a6ff;">Today's Summary</div>
+      <div style="font-size:0.85rem;color:#8b949e;" id="trade-date"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">Running</div>
+        <div class="value blue" style="font-size:1.3rem;" id="td-running">0</div>
+        <div style="font-size:0.75rem;color:#8b949e;" id="td-running-list"></div>
+      </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">Closed</div>
+        <div class="value blue" style="font-size:1.3rem;" id="td-closed">0</div>
+        <div style="font-size:0.75rem;color:#8b949e;" id="td-closed-list"></div>
+      </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">P&L (closed)</div>
+        <div class="value" style="font-size:1.3rem;" id="td-pnl">₹0</div>
+        <div style="font-size:0.75rem;color:#8b949e;">today</div>
+      </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">Est. Charges</div>
+        <div class="value red" style="font-size:1.3rem;" id="td-charges">₹0</div>
+        <div style="font-size:0.75rem;color:#8b949e;" id="td-charge-legs"></div>
+      </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">Net P&L</div>
+        <div class="value" style="font-size:1.3rem;" id="td-net">₹0</div>
+        <div style="font-size:0.75rem;color:#8b949e;">after charges</div>
       </div>
     </div>
   </div>
 
   <!-- Strategy cards -->
   <div class="strategy-grid" id="strat-grid">
-    {% for sid in ['ic','cs','sma'] %}
+    {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr'] %}
     <div class="strat" id="strat-{{ sid }}">
-      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)'}[sid] }}</div>
+      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)'}[sid] }}</div>
       <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span> <span class="text-xs" id="resume-{{ sid }}" style="color:#d29922;display:none;">&#9888; Position saved</span></div>
       <div class="btn-row">
         <button class="btn btn-primary" id="start-{{ sid }}" onclick="action('{{ sid }}','start')">&#9654; Start</button>
+        <button class="btn btn-secondary" id="resume-btn-{{ sid }}" onclick="action('{{ sid }}','resume')" style="display:none;">&#8635; Resume</button>
         <button class="btn btn-danger" id="stop-{{ sid }}" onclick="action('{{ sid }}','stop')" disabled>&#9632; Stop</button>
+      </div>
+      <div class="lots-row" id="lots-{{ sid }}">
+        <label style="font-size:0.9rem;color:#8b949e;">Lots:</label>
+        <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10" style="width:60px;padding:6px 8px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:1rem;">
       </div>
       <div class="mini-log" id="log-{{ sid }}"><div class="hl">Waiting...</div></div>
     </div>
     {% endfor %}
   </div>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      for (const s of ['sw','sr']) {
+        var el = document.getElementById('lots-' + s);
+        if (el) el.style.display = 'none';
+      }
+    });
 
   <!-- Settings tabs -->
   <div class="card">
@@ -307,8 +361,11 @@ document.querySelectorAll('[data-tab]').forEach(btn => {
 });
 
 async function action(strategy, cmd) {
-  if (cmd === 'start') {
-    await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy });
+  if (cmd === 'start' || cmd === 'resume') {
+    var lots = 1;
+    var inp = document.getElementById('lots-input-' + strategy);
+    if (inp) lots = parseInt(inp.value) || 1;
+    await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy + '&resume=' + (cmd === 'resume' ? '1' : '0') + '&lots=' + lots });
   } else {
     await fetch('/api/stop', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy });
   }
@@ -325,7 +382,7 @@ async function fetchStatus() {
     else if (d.token_ok === false) { tk.textContent = 'EXPIRED'; tk.className = 'value red'; }
     else { tk.textContent = '---'; tk.className = 'value'; }
     let count = 0;
-    for (const s of ['ic','cs','sma']) {
+    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr']) {
       const running = d.strategies && d.strategies[s];
       if (running) count++;
       const dot = $('dot-' + s);
@@ -334,14 +391,17 @@ async function fetchStatus() {
       $('start-' + s).disabled = running;
       $('stop-' + s).disabled = !running;
       const ri = $('resume-' + s);
+      const rb = $('resume-btn-' + s);
       if (d.positions && d.positions[s]) {
         ri.style.display = 'inline';
         ri.title = 'Expiry: ' + d.positions[s].expiry + ' | Credit: ?' + d.positions[s].entry_credit;
+        if (!running) { rb.style.display = 'inline'; }
       } else {
         ri.style.display = 'none';
+        rb.style.display = 'none';
       }
     }
-    $('s-count').textContent = count + '/3';
+    $('s-count').textContent = count + '/8';
   } catch(e) {}
 }
 setInterval(fetchStatus, 5000);
@@ -349,7 +409,7 @@ fetchStatus();
 
 async function fetchLogs() {
   try {
-    for (const s of ['ic','cs','sma']) {
+    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr']) {
       const d = await (await fetch('/api/log?strategy=' + s)).json();
       const box = $('log-' + s);
       if (d.output && d.output.length) {
@@ -384,9 +444,15 @@ async function fetchMarket() {
       $('m-pcr').textContent = d.pcr.toFixed(2);
       $('m-pcr').className = 'value';
       $('m-pcr').style.fontSize = '1.5rem';
-      $('m-pcr').style.color = d.pcr > 1.2 ? '#f85149' : d.pcr < 0.8 ? '#3fb950' : '#d29922';
+      let sentColor = '#d29922';
+      if (d.sentiment.includes('STRONG BEAR')) sentColor = '#f85149';
+      else if (d.sentiment.includes('BEARISH')) sentColor = '#da3633';
+      else if (d.sentiment.includes('WEAK BEAR')) sentColor = '#d29922';
+      else if (d.sentiment.includes('WEAK BULL')) sentColor = '#58a6ff';
+      else if (d.sentiment.includes('BULLISH') || d.sentiment.includes('STRONG BULL')) sentColor = '#3fb950';
+      $('m-pcr').style.color = sentColor;
       $('m-sentiment').textContent = d.sentiment;
-      $('m-sentiment').style.color = d.pcr > 1.2 ? '#f85149' : d.pcr < 0.8 ? '#3fb950' : '#d29922';
+      $('m-sentiment').style.color = sentColor;
       $('m-ce-oi').textContent = (d.ce_oi / 1e7).toFixed(2) + 'Cr';
       $('m-pe-oi').textContent = (d.pe_oi / 1e7).toFixed(2) + 'Cr';
     }
@@ -395,6 +461,33 @@ async function fetchMarket() {
 }
 setInterval(fetchMarket, 15000);
 fetchMarket();
+
+async function fetchTrades() {
+  try {
+    const d = await (await fetch('/api/trades')).json();
+    if (d.error) return;
+    $('trade-date').textContent = d.date;
+    $('td-running').textContent = d.running_trades;
+    $('td-running-list').textContent = d.running_details.join(', ') || 'none';
+    $('td-closed').textContent = d.closed_trades;
+    const stratList = Object.entries(d.by_strategy).map(([k,v]) => k + ':' + v).join(', ');
+    $('td-closed-list').textContent = stratList || 'none';
+    const isGreen = d.closed_pnl >= 0;
+    $('td-pnl').textContent = '₹' + d.closed_pnl.toLocaleString('en-IN', {minimumFractionDigits:2});
+    $('td-pnl').className = 'value';
+    $('td-pnl').style.fontSize = '1.3rem';
+    $('td-pnl').style.color = isGreen ? '#3fb950' : '#f85149';
+    $('td-charges').textContent = '₹' + d.estimated_charges.toLocaleString('en-IN');
+    $('td-charge-legs').textContent = d.charge_legs + ' legs @ ₹50/leg';
+    const net = d.closed_pnl - d.estimated_charges;
+    $('td-net').textContent = '₹' + net.toLocaleString('en-IN', {minimumFractionDigits:2});
+    $('td-net').className = 'value';
+    $('td-net').style.fontSize = '1.3rem';
+    $('td-net').style.color = net >= 0 ? '#3fb950' : '#f85149';
+  } catch(e) {}
+}
+setInterval(fetchTrades, 10000);
+fetchTrades();
 
 $('btn-login')?.addEventListener('click', () => {
   $('login-hint').style.display = 'block';
@@ -491,12 +584,22 @@ def api_token():
 @require_auth
 def api_start():
     strategy = request.form.get("strategy", "")
+    resume = request.form.get("resume", "0") == "1"
+    lots = request.form.get("lots", "1")
     if strategy not in STRATEGIES:
         return jsonify({"ok": False, "error": "Invalid strategy"}), 400
     proc = bot_processes.get(strategy)
     if proc and proc.poll() is None:
         return jsonify({"ok": False, "error": f"{strategy.upper()} already running"}), 400
-    cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy={strategy}"]
+    if strategy in ("sw", "sr"):
+        script = "swing_scanner.py" if strategy == "sw" else "swing_rebalancer.py"
+        cmd = [sys.executable, "-u", str(BOT_DIR / script)]
+    else:
+        cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy={strategy}"]
+        if resume:
+            cmd.append("--resume")
+        if lots and lots != "1":
+            cmd.append(f"--lots={lots}")
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.Popen(
@@ -569,6 +672,9 @@ def api_status():
         p = cfg["cs_position"]
         legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
         positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
+    if cfg.get("manual_trade"):
+        p = cfg["manual_trade"]
+        positions["mt"] = {"expiry": p.get("expiry", ""), "entry_credit": p.get("entry_price", 0), "legs": [f"{p['side']} {p['tsym']} SL @ {p.get('sl',0)}"]}
     return jsonify({
         "strategies": running,
         "heartbeat": heartbeat,
@@ -643,12 +749,18 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             result["pe_oi"] = pe_oi
             pcr = pe_oi / ce_oi if ce_oi else 0
             result["pcr"] = round(pcr, 4)
-            if pcr > 1.2:
+            if pcr > 1.3:
+                result["sentiment"] = "STRONG BEARISH"
+            elif pcr > 1.15:
                 result["sentiment"] = "BEARISH"
-            elif pcr > 0.8:
-                result["sentiment"] = "NEUTRAL"
-            else:
+            elif pcr > 1.0:
+                result["sentiment"] = "WEAK BEARISH"
+            elif pcr > 0.85:
+                result["sentiment"] = "WEAK BULLISH"
+            elif pcr > 0.7:
                 result["sentiment"] = "BULLISH"
+            else:
+                result["sentiment"] = "STRONG BULLISH"
         result["time"] = datetime.now().strftime("%H:%M:%S")
     except Exception:
         pass
@@ -674,6 +786,58 @@ def api_market():
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/trades")
+@require_auth
+def api_trades():
+    """Return today's trade summary: count, P&L, charges, running trades."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    closed = {"total": 0, "pnl": 0.0, "by_strategy": {}, "legs": 0}
+    if TRADE_LOG.exists():
+        try:
+            import csv
+            with open(TRADE_LOG, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row.get("date", "") == today:
+                        pnl = float(row.get("pnl", 0))
+                        closed["total"] += 1
+                        closed["pnl"] += pnl
+                        strat = row.get("strategy", "?")
+                        closed["by_strategy"][strat] = closed["by_strategy"].get(strat, 0) + 1
+                        # Estimate legs per trade type
+                        if strat == "IC":
+                            closed["legs"] += 4
+                        elif strat and strat.startswith("CS"):
+                            closed["legs"] += 2
+                        else:
+                            closed["legs"] += 1
+        except Exception:
+            pass
+
+    # Charges estimate (Zerodha): ~Rs 50 per option leg (brokerage + STT + taxes)
+    est_charge_per_leg = 50
+    total_charges = closed["legs"] * est_charge_per_leg
+
+    # Running trades from config
+    cfg = load_config()
+    running = 0
+    running_details = []
+    for key, label in [("position", "IC"), ("cs_position", "CS"), ("manual_trade", "MT")]:
+        if cfg.get(key):
+            running += 1
+            running_details.append(label)
+
+    return jsonify({
+        "date": today,
+        "closed_trades": closed["total"],
+        "closed_pnl": round(closed["pnl"], 2),
+        "by_strategy": closed["by_strategy"],
+        "estimated_charges": total_charges,
+        "charge_legs": closed["legs"],
+        "running_trades": running,
+        "running_details": running_details,
+    })
 
 
 @app.route("/api/config", methods=["GET"])

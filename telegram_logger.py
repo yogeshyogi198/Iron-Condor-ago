@@ -82,6 +82,31 @@ def pnl_alert(pnl: float, trade_id: str = ""):
     send_telegram(msg, level=level)
 
 
+def strategy_entry_alert(strategy: str, legs: list):
+    lines = [f"🚀 *{strategy} ENTERED*"]
+    for leg in legs:
+        act = leg.get("action", "")
+        strike = leg.get("strike", 0)
+        otype = leg.get("option_type", "")
+        prem = leg.get("premium", 0)
+        tsym = leg.get("tradingsymbol", "")
+        lines.append(f"  {act} {tsym} @ ₹{prem:.2f}")
+    net = sum(l.get("premium", 0) for l in legs if l.get("action") == "SELL") - \
+          sum(l.get("premium", 0) for l in legs if l.get("action") == "BUY")
+    lines.append(f"  Net Credit: ₹{net:.2f}")
+    send_telegram("\n".join(lines), level="TRADE")
+
+
+def strategy_exit_alert(strategy: str, reason: str, pnl: float):
+    icon = "✅" if pnl >= 0 else "❌"
+    send_telegram(f"{icon} *{strategy} EXIT* ({reason})\nP&L: ₹{pnl:+.2f}",
+                  level="PROFIT" if pnl >= 0 else "LOSS")
+
+
+def error_alert(context: str, error_msg: str):
+    send_telegram(f"🔴 *ERROR* [{context}]\n{error_msg}", level="ERROR")
+
+
 # ── Logging handler ───────────────────────────────────────
 
 class TelegramHandler(logging.Handler):
@@ -127,6 +152,83 @@ def _handle_exception(exc_type, exc_value, exc_tb):
 def enable_crash_alerts():
     sys.excepthook = _handle_exception
     send_telegram("🤖 AlgoBot started successfully!", level="INFO")
+
+
+def send_daily_summary(data: dict):
+    """Send a formatted daily summary to Telegram.
+    
+    data = {
+        "date": "2026-06-12",
+        "indices": {
+            "nifty": {"open": 23500, "high": 23650, "low": 23480, "close": 23622, "change_pct": 0.52},
+            "sensex": {...},
+            "banknifty": {...}
+        },
+        "option_oi": {
+            "nifty": {"expiry": "2026-06-16", "spot": 23622, "atm": {...}, "near": [...], "ce": {...}, "pe": {...}, "pcr": 1.15},
+            "banknifty": {...},
+            "sensex": {...}
+        },
+        "trades": {"total": 1, "pnl": -3198.0, "charges": 198.5, "net": -3396.5}
+    }
+    """
+    lines = [f"📊 DAILY SUMMARY | {data.get('date', 'N/A')}"]
+    lines.append("")
+
+    for label, key in [("NIFTY", "nifty"), ("SENSEX", "sensex"), ("BANK NIFTY", "banknifty")]:
+        idx = data.get("indices", {}).get(key)
+        if idx:
+            o = idx.get("open", 0)
+            h = idx.get("high", 0)
+            l = idx.get("low", 0)
+            c = idx.get("close", 0)
+            chg = idx.get("change", 0)
+            chg_pct = idx.get("change_pct", 0)
+            rng = h - l
+            arrow = "🔺" if chg >= 0 else "🔻"
+            lines.append(f"{arrow} {label}")
+            lines.append(f"  Open: {o:,.2f}  High: {h:,.2f}  Low: {l:,.2f}  Close: {c:,.2f}")
+            lines.append(f"  Day Range: {rng:,.2f}  |  Gain: {chg:+,.2f}  ({chg_pct:+.2f}%)")
+
+    all_oi = data.get("option_oi", {})
+    for label, key in [("NIFTY", "nifty"), ("BANK NIFTY", "banknifty"), ("SENSEX", "sensex")]:
+        oi = all_oi.get(key)
+        if oi and oi.get("near"):
+            expiry = oi.get("expiry", "N/A")
+            spot = oi.get("spot", 0)
+            lines.append("")
+            lines.append(f"OPTION OI — {label} ({expiry} @ {spot:,.0f})")
+            atm = oi.get("atm", {})
+            if atm:
+                lines.append(f"  ATM ({atm['strike']:,})  CE: {atm['ce_oi']:,}  PE: {atm['pe_oi']:,}")
+            lines.append("  Strikes:")
+            for s in oi["near"]:
+                marker = "  ← ATM" if s.get("is_atm") else ""
+                lines.append(f"    {s['strike']:,}  CE: {s['ce_oi']:,}  PE: {s['pe_oi']:,}{marker}")
+            ce = oi.get("ce", {})
+            pe = oi.get("pe", {})
+            if ce:
+                lines.append(f"  Max CE: {ce['strike']:,} @ {ce['oi']:,}")
+            if pe:
+                lines.append(f"  Max PE: {pe['strike']:,} @ {pe['oi']:,}")
+            pcr = oi.get("pcr", 0)
+            if pcr:
+                lines.append(f"  PCR: {pcr:.2f}")
+
+    trades = data.get("trades")
+    if trades and trades.get("total", 0) > 0:
+        lines.append("")
+        lines.append("💰 TODAY'S TRADES")
+        lines.append(f"  Trades: {trades['total']}")
+        pnl = trades.get("pnl", 0)
+        icon = "✅" if pnl >= 0 else "❌"
+        lines.append(f"  P&L: {icon} ₹{pnl:+,.2f}")
+        lines.append(f"  Charges: ₹{trades.get('charges', 0):,.2f}")
+        net = trades.get("net", 0)
+        net_icon = "✅" if net >= 0 else "❌"
+        lines.append(f"  Net: {net_icon} ₹{net:+,.2f}")
+
+    send_telegram("\n".join(lines), level="INFO")
 
 
 # ── Decorator ─────────────────────────────────────────────
