@@ -179,14 +179,55 @@ PAGE = r"""<!DOCTYPE html>
   a { color: #58a6ff; text-decoration: none; }
   a:hover { text-decoration: underline; }
   .text-xs { font-size: 0.95rem; color: #8b949e; }
+  /* ── Tablet ── */
+  @media (max-width: 1024px) {
+    body { padding: 16px; font-size: 18px; }
+    .strategy-grid { grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .top-row .stat-box { min-width: 120px; padding: 12px 20px; }
+    .top-row .stat-box .value { font-size: 1.3rem; }
+    .card { padding: 20px; }
+    .tab-bar button { padding: 10px 18px; font-size: 0.95rem; }
+    h1 { font-size: 1.8rem; }
+    .strat .name { font-size: 1.2rem; }
+    .btn { padding: 12px 20px; font-size: 1rem; }
+  }
+  /* ── Mobile ── */
   @media (max-width: 768px) {
-    body { padding: 12px; font-size: 18px; }
-    .strategy-grid { grid-template-columns: 1fr; gap: 16px; }
-    .top-row .stat-box { min-width: 100px; padding: 10px 16px; }
-    .top-row .stat-box .value { font-size: 1.2rem; }
-    .card { padding: 16px; }
-    .tab-bar button { padding: 8px 12px; font-size: 0.85rem; }
-    .strat .mini-log { font-size: 0.75rem; max-height: 150px; }
+    body { padding: 10px; font-size: 15px; }
+    .container { padding: 0; }
+    h1 { font-size: 1.4rem; margin-bottom: 16px; gap: 8px; }
+    h1 small { font-size: 0.8rem; }
+    .card { padding: 12px; margin-bottom: 12px; border-radius: 10px; }
+    .strategy-grid { grid-template-columns: 1fr; gap: 12px; }
+    .strat { padding: 14px; gap: 10px; }
+    .strat .name { font-size: 1rem; }
+    .strat .status { font-size: 0.85rem; }
+    .strat .status .dot { width: 10px; height: 10px; }
+    .strat .btn-row { gap: 8px; flex-wrap: wrap; }
+    .strat .btn-row .btn { flex: 1; min-width: 80px; padding: 10px 12px; font-size: 0.85rem; }
+    .strat .mini-log { font-size: 0.65rem; max-height: 120px; padding: 8px; }
+    .top-row { gap: 8px; margin-bottom: 12px; }
+    .top-row .stat-box { min-width: 80px; padding: 8px 10px; border-radius: 8px; flex: 1; }
+    .top-row .stat-box .label { font-size: 0.65rem; }
+    .top-row .stat-box .value { font-size: 1rem; margin-top: 4px; }
+    .tab-bar { gap: 4px; overflow-x: auto; }
+    .tab-bar button { padding: 8px 14px; font-size: 0.8rem; white-space: nowrap; }
+    .btn { padding: 10px 16px; font-size: 0.85rem; border-radius: 8px; }
+    input { padding: 10px 14px; font-size: 0.9rem; }
+    .msg { padding: 12px 14px; font-size: 0.9rem; }
+    .text-xs { font-size: 0.75rem; }
+    .lots-row input { width: 50px !important; font-size: 0.85rem !important; }
+  }
+  /* ── Market data & summary grid responsive ── */
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  @media (max-width: 1024px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .grid-5 { grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  }
+  @media (max-width: 768px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .grid-5 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
   }
 </style>
 </head>
@@ -206,7 +247,7 @@ PAGE = r"""<!DOCTYPE html>
     <div class="top-row">
       <div class="stat-box"><div class="label">Heartbeat</div><div class="value" id="s-heartbeat">---</div></div>
       <div class="stat-box"><div class="label">Token</div><div class="value" id="s-token">---</div></div>
-      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/3</div></div>
+      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/8</div></div>
     </div>
   </div>
 
@@ -216,7 +257,7 @@ PAGE = r"""<!DOCTYPE html>
       <div style="font-size:1.2rem;font-weight:700;color:#58a6ff;">Market Data</div>
       <div style="font-size:0.85rem;color:#8b949e;" id="market-time"></div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;">
+    <div class="grid-4">
       <div class="stat-box" style="min-width:0;">
         <div class="label">NIFTY</div>
         <div class="value blue" style="font-size:1.3rem;" id="m-nifty-spot">---</div>
@@ -250,7 +291,7 @@ PAGE = r"""<!DOCTYPE html>
       <div style="font-size:1.1rem;font-weight:700;color:#58a6ff;">Today's Summary</div>
       <div style="font-size:0.85rem;color:#8b949e;" id="trade-date"></div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+    <div class="grid-5">
       <div class="stat-box" style="min-width:0;padding:12px 16px;">
         <div class="label">Running</div>
         <div class="value blue" style="font-size:1.3rem;" id="td-running">0</div>
