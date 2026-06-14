@@ -35,7 +35,7 @@ CONFIG_FILE = BOT_DIR / "kite_config.json"
 HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
 TRADE_LOG = BOT_DIR / "trade_log.csv"
 
-STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sw", "sr"]
+STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sw", "sr", "ratio"]
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -117,6 +117,7 @@ STRATEGY_LABELS = {
     "sr": "Swing Rebalancer (Daily)",
     "bnf": "Bank Nifty 2H SMA(60)",
     "n1h": "Nifty 1H SMA Options",
+    "ratio": "NIFTYBEES/GOLDBEES Ratio",
 }
 
 PAGE = r"""<!DOCTYPE html>
@@ -326,9 +327,9 @@ PAGE = r"""<!DOCTYPE html>
 
   <!-- Strategy cards -->
   <div class="strategy-grid" id="strat-grid">
-    {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr'] %}
+    {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio'] %}
     <div class="strat" id="strat-{{ sid }}">
-      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)'}[sid] }}</div>
+      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)','ratio':'NIFTYBEES/GOLDBEES Ratio'}[sid] }}</div>
       <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span> <span class="text-xs" id="resume-{{ sid }}" style="color:#d29922;display:none;">&#9888; Position saved</span></div>
       <div class="btn-row">
         <button class="btn btn-primary" id="start-{{ sid }}" onclick="action('{{ sid }}','start')">&#9654; Start</button>
@@ -429,7 +430,7 @@ async function fetchStatus() {
     else { tk.textContent = '---'; tk.className = 'value'; }
     let count = 0;
     var runningNames = [];
-    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr']) {
+    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio']) {
       const running = d.strategies && d.strategies[s];
       if (running) { count++; runningNames.push(s.toUpperCase()); }
       const dot = $('dot-' + s);
@@ -448,7 +449,7 @@ async function fetchStatus() {
         rb.style.display = 'none';
       }
     }
-    $('s-count').textContent = count + '/8';
+    $('s-count').textContent = count + '/9';
     $('s-running-list').textContent = runningNames.length ? runningNames.join(', ') : 'none';
   } catch(e) {}
 }
@@ -457,7 +458,7 @@ fetchStatus();
 
 async function fetchLogs() {
   try {
-    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr']) {
+    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio']) {
       const d = await (await fetch('/api/log?strategy=' + s)).json();
       const box = $('log-' + s);
       if (d.output && d.output.length) {
@@ -640,9 +641,9 @@ def api_start():
     proc = bot_processes.get(strategy)
     if proc and proc.poll() is None:
         return jsonify({"ok": False, "error": f"{strategy.upper()} already running"}), 400
-    if strategy in ("sw", "sr"):
-        script = "swing_scanner.py" if strategy == "sw" else "swing_rebalancer.py"
-        cmd = [sys.executable, "-u", str(BOT_DIR / script)]
+    if strategy in ("sw", "sr", "ratio"):
+        scripts = {"sw": "swing_scanner.py", "sr": "swing_rebalancer.py", "ratio": "ratio_strategy.py"}
+        cmd = [sys.executable, "-u", str(BOT_DIR / scripts[strategy])]
     else:
         cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy={strategy}"]
         if resume:
@@ -883,7 +884,7 @@ def api_trades():
             running_details.append(label)
     for s, proc in bot_processes.items():
         if proc and proc.poll() is None:
-            short = {"ic":"IC","cs":"CS","sma":"SMA","mt":"MT","bnf":"BNF","n1h":"N1H","sw":"SW","sr":"SR"}.get(s, s.upper())
+            short = {"ic":"IC","cs":"CS","sma":"SMA","mt":"MT","bnf":"BNF","n1h":"N1H","sw":"SW","sr":"SR","ratio":"RATIO"}.get(s, s.upper())
             if short not in running_details:
                 running += 1
                 running_details.append(short)
