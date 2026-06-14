@@ -26,7 +26,8 @@ HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
 
 NIFTYBEES_SYMBOL = "NIFTYBEES"
 GOLDBEES_SYMBOL = "GOLDBEES"
-LOOKBACK_DAYS = 60
+LOOKBACK_DAYS = 90
+MIN_DATA_POINTS = 30
 ENTRY_WINDOW = 20
 EXIT_WINDOW = 10
 CHECK_HOUR = 15
@@ -76,12 +77,18 @@ def _fetch_daily(kite: KiteConnect, token: int,
 
 def _align_prices(data_niftybees: list[dict],
                    data_goldbees: list[dict]) -> tuple[list, list]:
-    dates_n = {c["date"][:10] for c in data_niftybees}
-    dates_g = {c["date"][:10] for c in data_goldbees}
+    def _date_key(d):
+        dt = d.get("date")
+        if isinstance(dt, str):
+            return dt[:10]
+        return dt.strftime("%Y-%m-%d")
+
+    dates_n = {_date_key(c) for c in data_niftybees}
+    dates_g = {_date_key(c) for c in data_goldbees}
     common = sorted(dates_n & dates_g)
 
-    n_map = {c["date"][:10]: c["close"] for c in data_niftybees}
-    g_map = {c["date"][:10]: c["close"] for c in data_goldbees}
+    n_map = {_date_key(c): c["close"] for c in data_niftybees}
+    g_map = {_date_key(c): c["close"] for c in data_goldbees}
 
     close_n, close_g = [], []
     for d in common:
@@ -227,7 +234,7 @@ def main():
         ndata = _fetch_daily(kite, n_token)
         gdata = _fetch_daily(kite, g_token)
 
-        if len(ndata) < LOOKBACK_DAYS or len(gdata) < LOOKBACK_DAYS:
+        if len(ndata) < MIN_DATA_POINTS or len(gdata) < MIN_DATA_POINTS:
             print(f"  Insufficient data: NIFTYBEES={len(ndata)}, "
                   f"GOLDBEES={len(gdata)}")
             return False
