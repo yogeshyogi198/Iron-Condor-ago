@@ -30,12 +30,22 @@ from kiteconnect import KiteConnect
 
 load_dotenv()
 
+_DASH_API_CALLS: list[float] = []
+
+def _dash_rate_limit():
+    now = time.time()
+    _DASH_API_CALLS[:] = [t for t in _DASH_API_CALLS if now - t < 1]
+    if len(_DASH_API_CALLS) >= 3:
+        time.sleep(0.35)
+    _DASH_API_CALLS.append(time.time())
+
 BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
 HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
 TRADE_LOG = BOT_DIR / "trade_log.csv"
 
 STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sw", "sr", "ratio"]
+LOT_SIZE = 65  # NIFTY lot size for charges estimation
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -319,14 +329,19 @@ PAGE = r"""<!DOCTYPE html>
         <div style="font-size:0.75rem;color:#8b949e;" id="td-live-pos"></div>
       </div>
       <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Est. Charges</div>
-        <div class="value red" style="font-size:1.3rem;" id="td-charges">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;" id="td-charge-legs"></div>
+        <div class="label">Est. Charges (Running)</div>
+        <div class="value red" style="font-size:1.3rem;" id="td-chg-running">₹0</div>
+        <div style="font-size:0.75rem;color:#8b949e;">open positions @ LTP</div>
+      </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">Actual Charges (Closed)</div>
+        <div class="value red" style="font-size:1.3rem;" id="td-chg-closed">₹0</div>
+        <div style="font-size:0.75rem;color:#8b949e;">trade log @ fill price</div>
       </div>
       <div class="stat-box" style="min-width:0;padding:12px 16px;">
         <div class="label">Net P&L</div>
         <div class="value" style="font-size:1.3rem;" id="td-net">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;">after charges</div>
+        <div style="font-size:0.75rem;color:#8b949e;">after total charges</div>
       </div>
     </div>
   </div>
@@ -603,9 +618,9 @@ async function fetchTrades() {
       $('td-live-pnl').style.color = liveGreen ? '#3fb950' : '#f85149';
       $('td-live-pos').textContent = (d.live_positions || 0) + ' positions';
     }
-    $('td-charges').textContent = '₹' + d.estimated_charges.toLocaleString('en-IN');
-    $('td-charge-legs').textContent = d.charge_legs + ' legs @ ₹50/leg';
-    const net = d.closed_pnl - d.estimated_charges;
+    $('td-chg-running').textContent = '₹' + (d.est_charges_running || 0).toLocaleString('en-IN');
+    $('td-chg-closed').textContent = '₹' + (d.actual_charges_closed || 0).toLocaleString('en-IN');
+    const net = (d.closed_pnl || 0) - (d.total_charges || 0);
     $('td-net').textContent = '₹' + net.toLocaleString('en-IN', {minimumFractionDigits:2});
     $('td-net').className = 'value';
     $('td-net').style.fontSize = '1.3rem';
@@ -998,7 +1013,44 @@ def api_log():
     return jsonify({"output": out[-100:]})
 
 
+def calc_charges(legs: list, lot_size: int, exchange: str = "NFO") -> float:
+    """Mirror of iron_condor_algo's calc_charges for dashboard estimates."""
+    orders = len(legs) * 2
+    brokerage = orders * 20.0
+    total_prem_turnover = 0.0
+    sell_prem_value = 0.0
+    for leg in legs:
+        prem = float(leg.get("premium", 0))
+        action = leg.get("action", "")
+        value = prem * lot_size
+        total_prem_turnover += value
+        if action == "SELL":
+            sell_prem_value += value
+    stt = sell_prem_value * 0.0005
+    rate_per_crore = 50.5 if exchange == "NFO" else 37.5
+    turnover_cr = total_prem_turnover / 1_00_00_000
+    trans_charge = turnover_cr * rate_per_crore
+    sebi = turnover_cr * 10.0
+    stamp = total_prem_turnover * 0.00003
+    gst = (brokerage + trans_charge + sebi) * 0.18
+    return round(brokerage + stt + trans_charge + sebi + stamp + gst, 2)
+
+
 _market_cache = {"data": None, "time": 0}
+
+def classify_pcr(pcr: float, price_change_pct: float = 0) -> str:
+    if pcr >= 1.30:
+        return "STRONG BULLISH"
+    if pcr >= 1.06:
+        return "WEAK BULLISH"
+    if pcr >= 0.95:
+        base = "NEUTRAL"
+        if price_change_pct > 0.5:
+            return f"{base} TO BULLISH"
+        return base
+    if pcr >= 0.75:
+        return "WEAK BEARISH"
+    return "STRONG BEARISH"
 
 def fetch_market_data(kite: KiteConnect) -> dict:
     symbols = ["NSE:NIFTY 50", "BSE:SENSEX", "NSE:NIFTY BANK"]
@@ -1052,18 +1104,8 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             result["pe_oi"] = pe_oi
             pcr = pe_oi / ce_oi if ce_oi else 0
             result["pcr"] = round(pcr, 4)
-            if pcr > 1.3:
-                result["sentiment"] = "STRONG BULLISH"
-            elif pcr > 1.15:
-                result["sentiment"] = "BULLISH"
-            elif pcr > 1.0:
-                result["sentiment"] = "WEAK BULLISH"
-            elif pcr > 0.85:
-                result["sentiment"] = "WEAK BEARISH"
-            elif pcr > 0.7:
-                result["sentiment"] = "BEARISH"
-            else:
-                result["sentiment"] = "STRONG BEARISH"
+            nifty_chg = result.get("nifty", {}).get("change_pct", 0)
+            result["sentiment"] = classify_pcr(pcr, nifty_chg)
         result["time"] = datetime.now().strftime("%H:%M:%S")
     except Exception:
         pass
@@ -1083,6 +1125,7 @@ def api_market():
     if not api_key or not access_token:
         return jsonify({"error": "Not authenticated"}), 401
     try:
+        _dash_rate_limit()
         kite = KiteConnect(api_key=api_key, access_token=access_token, timeout=15)
         data = fetch_market_data(kite)
         _market_cache = {"data": data, "time": now}
@@ -1094,9 +1137,9 @@ def api_market():
 @app.route("/api/trades")
 @require_auth
 def api_trades():
-    """Return today's trade summary: count, P&L, charges, running trades."""
+    """Return today's trade summary: closed & running P&L, actual & estimated charges."""
     today = datetime.now().strftime("%Y-%m-%d")
-    closed = {"total": 0, "pnl": 0.0, "by_strategy": {}, "legs": 0}
+    closed = {"total": 0, "pnl": 0.0, "charges": 0.0, "by_strategy": {}}
     if TRADE_LOG.exists():
         try:
             import csv
@@ -1106,25 +1149,20 @@ def api_trades():
                         pnl = float(row.get("pnl", 0))
                         closed["total"] += 1
                         closed["pnl"] += pnl
+                        chg = row.get("charges", "0")
+                        try:
+                            closed["charges"] += float(chg)
+                        except Exception:
+                            pass
                         strat = row.get("strategy", "?")
                         closed["by_strategy"][strat] = closed["by_strategy"].get(strat, 0) + 1
-                        # Estimate legs per trade type
-                        if strat == "IC":
-                            closed["legs"] += 4
-                        elif strat and strat.startswith("CS"):
-                            closed["legs"] += 2
-                        else:
-                            closed["legs"] += 1
         except Exception:
             pass
-
-    # Charges estimate (Zerodha): ~Rs 50 per option leg (brokerage + STT + taxes)
-    est_charge_per_leg = 50
-    total_charges = closed["legs"] * est_charge_per_leg
 
     # Live P&L from Zerodha positions
     live_pnl = None
     live_positions = 0
+    running_charges = 0.0
     cfg = load_config()
     api_key = cfg.get("api_key", "")
     access_token = cfg.get("access_token", "")
@@ -1137,6 +1175,41 @@ def api_trades():
                 live_pnl += float(p.get("pnl", 0))
                 if int(p.get("quantity", 0)) != 0 and p.get("tradingsymbol"):
                     live_positions += 1
+
+            # Estimated charges for running positions: use current LTP
+            day_positions = all_pos.get("day", [])
+            if day_positions:
+                # Group positions by exchange for batch quoting
+                by_exchange: dict[str, list] = {}
+                for p in day_positions:
+                    if not p.get("tradingsymbol"):
+                        continue
+                    ex = p.get("exchange", "NFO")
+                    by_exchange.setdefault(ex, []).append(p)
+                running_legs = []
+                for ex, pos_list in by_exchange.items():
+                    tsyms = [f"{ex}:{p['tradingsymbol']}" for p in pos_list]
+                    for i in range(0, len(tsyms), 500):
+                        batch = tsyms[i:i+500]
+                        try:
+                            quotes = k.quote(batch)
+                            for full_sym, q in quotes.items():
+                                prefix = f"{ex}:"
+                                if full_sym.startswith(prefix):
+                                    sym = full_sym[len(prefix):]
+                                else:
+                                    sym = full_sym
+                                matches = [p for p in pos_list if p["tradingsymbol"] == sym]
+                                if matches:
+                                    p = matches[0]
+                                    action = "BUY" if int(p.get("quantity", 0)) > 0 else "SELL"
+                                    prem = q.get("last_price", 0)
+                                    running_legs.append({"action": action, "premium": prem})
+                        except Exception:
+                            pass
+                if running_legs:
+                    running_charges = calc_charges(running_legs, LOT_SIZE)
+
         except Exception:
             pass
 
@@ -1154,13 +1227,28 @@ def api_trades():
                 running += 1
                 running_details.append(short)
 
+    # For running IC/CS positions that have leg details in config, compute exact estimate
+    for pos_key in ("position", "cs_position"):
+        pos = cfg.get(pos_key)
+        if pos and pos.get("legs"):
+            try:
+                leg_list = []
+                for leg in pos["legs"]:
+                    leg_list.append({"action": leg.get("action", ""), "premium": leg.get("premium", 0)})
+                running_charges += calc_charges(leg_list, LOT_SIZE)
+            except Exception:
+                pass
+
+    total_charges = round(closed["charges"] + running_charges, 2)
+
     return jsonify({
         "date": today,
         "closed_trades": closed["total"],
         "closed_pnl": round(closed["pnl"], 2),
         "by_strategy": closed["by_strategy"],
-        "estimated_charges": total_charges,
-        "charge_legs": closed["legs"],
+        "actual_charges_closed": round(closed["charges"], 2),
+        "est_charges_running": round(running_charges, 2),
+        "total_charges": total_charges,
         "running_trades": running,
         "running_details": running_details,
         "live_pnl": round(live_pnl, 2) if live_pnl is not None else None,

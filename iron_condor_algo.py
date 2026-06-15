@@ -48,12 +48,48 @@ def red(s: str) -> str:
 def cyan(s: str) -> str:
     return f"{CYAN}{s}{RESET}"
 
+import random
 import requests
 from kiteconnect import KiteConnect
 
 import telegram_logger
 
-log: logging.Logger = None  # set up in main()
+class _NullLogger:
+    def debug(self, *a, **kw): pass
+    def info(self, *a, **kw): pass
+    def warning(self, *a, **kw): pass
+    def error(self, *a, **kw): pass
+    def critical(self, *a, **kw): pass
+
+log: logging.Logger = _NullLogger()  # set up properly in main()
+
+# ── API resilience: rate limiter + retry ──────
+_API_CALL_TIMES: list[float] = []
+_MAX_CALLS_PER_SEC = 3
+
+def _rate_limit():
+    now = time.time()
+    _API_CALL_TIMES[:] = [t for t in _API_CALL_TIMES if now - t < 1]
+    if len(_API_CALL_TIMES) >= _MAX_CALLS_PER_SEC:
+        time.sleep(0.35)
+    _API_CALL_TIMES.append(time.time())
+
+def api_retry(fn, *args, max_retries=3, **kwargs):
+    for attempt in range(max_retries):
+        try:
+            _rate_limit()
+            return fn(*args, **kwargs)
+        except Exception as e:
+            msg = str(e).lower()
+            if "429" in msg or "too many" in msg:
+                backoff = (2 ** attempt) + random.uniform(0, 1)
+                log.warning(f"Rate limited, backing off {backoff:.1f}s")
+                time.sleep(backoff)
+                continue
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+    return None
 
 # ---------------------------------------------------------------------------
 # Persisted config
@@ -85,14 +121,14 @@ TRADE_LOG_FIELDS = [
 def calc_charges(legs: list, lot_size: int, exchange: str = "NFO") -> float:
     """
     Exact Zerodha charges for options trade.
-    Brokerage: ₹20 per order (each leg is one order)
+    Brokerage: ₹20 per order (each leg is one order, entry + exit)
     STT: 0.05% on sell premium value (sell side only)
     Transaction: NSE ₹50.5/crore or BSE ₹37.5/crore on total premium turnover
     SEBI: ₹10/crore on total premium turnover
     GST: 18% on (brokerage + transaction + SEBI)
-    Stamp duty: ~0.002% of premium turnover
+    Stamp duty: ~0.003% of premium turnover
     """
-    orders = len(legs)
+    orders = len(legs) * 2  # entry + exit
     brokerage = orders * 20.0
 
     total_premium_turnover = 0.0
@@ -114,7 +150,7 @@ def calc_charges(legs: list, lot_size: int, exchange: str = "NFO") -> float:
 
     sebi = turnover_cr * 10.0
 
-    stamp = total_premium_turnover * 0.00002  # 0.002%
+    stamp = total_premium_turnover * 0.00003  # 0.003%
 
     gst = (brokerage + transaction_charge + sebi) * 0.18
 
@@ -151,10 +187,10 @@ def periodic_connection_test(kite: "KiteSession", exchange: str = "NFO"):
         else:
             qty, price, otype = LOT_SIZE, 0.05, "LIMIT"
             variety = "amo"
-        kite.kite.place_order(
-            variety, exchange=exchange, tradingsymbol=tsym,
-            transaction_type="BUY", quantity=qty, price=price,
-            product="NRML", order_type=otype, validity="DAY",
+        api_retry(
+            kite.kite.place_order, variety, exchange=exchange,
+            tradingsymbol=tsym, transaction_type="BUY", quantity=qty,
+            price=price, product="NRML", order_type=otype, validity="DAY",
         )
         if not market_open:
             print(f"  Test AMO BUY {tsym} x {qty} @ ₹{price} — visible in Zerodha terminal")
@@ -243,23 +279,39 @@ def _is_pid_running(pid: int) -> bool:
 
 def acquire_lock(lock_file: str) -> bool:
     crashed = False
+    host = os.environ.get("COMPUTERNAME", "unknown")
+    my_id = f"{host}-{os.getpid()}"
     if os.path.exists(lock_file):
         with open(lock_file) as f:
-            pid = f.read().strip()
+            content = f.read().strip()
+        parts = content.split("-", 1)
+        pid_str = parts[-1] if len(parts) > 1 else content
+        lock_host = parts[0] if len(parts) > 1 else ""
         try:
-            pid_int = int(pid) if pid else None
+            pid_int = int(pid_str) if pid_str else None
         except (ValueError, TypeError):
             pid_int = None
-        if pid_int and _is_pid_running(pid_int):
-            log.warning(f"Another instance (PID {pid_int}) already running. Exiting.")
+        if pid_int and lock_host == host and _is_pid_running(pid_int):
+            log.warning(f"Another instance (PID {pid_int}) already running on {host}. Exiting.")
             return False
         crashed = True
-    with open(lock_file, "w") as f:
-        f.write(str(os.getpid()))
-    atexit.register(lambda: os.remove(lock_file) if os.path.exists(lock_file) else None)
+    try:
+        with open(lock_file, "w") as f:
+            f.write(my_id)
+    except Exception as e:
+        log.warning(f"Could not write lock file: {e}")
+        return True
+    atexit.register(lambda: _safe_unlink(lock_file))
     if crashed:
-        log.warning("Iron Condor Bot crashed and will restart. Check .bot_heartbeat.txt for last activity.")
+        log.warning("Bot crashed previously. Check .bot_heartbeat.txt for last activity.")
     return True
+
+def _safe_unlink(path: str):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
 
 def init_trade_log():
     if not os.path.exists(TRADE_LOG):
@@ -280,7 +332,7 @@ def append_trade_log(row: dict):
 SYMBOL = "NIFTY"
 LOT_SIZE = 65
 
-SELL_PREMIUM_MIN = 14.0            # Short strike premium range: ₹14–25
+SELL_PREMIUM_MIN = 20.0            # Short strike premium range: ₹20–25
 SELL_PREMIUM_MAX = 25.0
 BUY_PREMIUM_MIN = 4.0              # Long strike premium range: ₹4–6
 BUY_PREMIUM_MAX = 6.0
@@ -437,13 +489,16 @@ class KiteSession:
 
     def get_nse_spot(self) -> float:
         sym = f"NSE:{NSE_SYMBOL}"
-        return self.kite.ltp(sym)[sym]["last_price"]
+        result = api_retry(self.kite.ltp, sym)
+        return result[sym]["last_price"] if result else 0.0
 
     def get_balance(self) -> float:
         """Return available cash balance (equity segment)."""
         try:
-            margins = self.kite.margins(segment="equity")
-            return float(margins["available"]["cash"])
+            margins = api_retry(self.kite.margins, segment="equity")
+            if margins:
+                return float(margins["available"]["cash"])
+            return 0.0
         except Exception as e:
             print(f"  Could not fetch balance: {e}")
             return 0.0
@@ -452,27 +507,29 @@ class KiteSession:
         q = {}
         for i in range(0, len(tradingsymbols), 500):
             keys = [f"NFO:{s}" for s in tradingsymbols[i:i+500]]
-            q.update(self.kite.quote(keys))
+            result = api_retry(self.kite.quote, keys)
+            if result:
+                q.update(result)
         return q
 
     def place_limit(self, tsym: str, ttype: str, qty: int, price: float, exchange: str = "NFO") -> str:
         variety = "amo" if not is_market_open() else "regular"
-        return self.kite.place_order(
-            variety,
+        return api_retry(
+            self.kite.place_order, variety,
             exchange=exchange, tradingsymbol=tsym, transaction_type=ttype,
             quantity=qty, price=price, product="NRML", order_type="LIMIT",
             validity="DAY", tag=self.static_id,
-        )
+        ) or ""
 
     def place_market(self, tsym: str, ttype: str, qty: int,
                      price: Optional[float] = None, exchange: str = "NFO") -> str:
         variety = "amo" if not is_market_open() else "regular"
-        return self.kite.place_order(
-            variety,
+        return api_retry(
+            self.kite.place_order, variety,
             exchange=exchange, tradingsymbol=tsym, transaction_type=ttype,
             quantity=qty, price=0, product="NRML", order_type="MARKET",
             validity="DAY", tag=self.static_id, market_protection=5,
-        )
+        ) or ""
 
     def get_fill_prices(self, orders_map: dict[str, str]) -> dict[str, float]:
         """Return {tradingsymbol: average_fill_price} for market orders.
@@ -480,11 +537,14 @@ class KiteSession:
         import time
         for _ in range(15):
             try:
-                all_orders = self.kite.orders()
+                all_orders = api_retry(self.kite.orders)
+                if not all_orders:
+                    time.sleep(0.3)
+                    continue
                 fills = {}
                 for tsym, oid in orders_map.items():
                     for o in all_orders:
-                        if o["order_id"] == oid and o.get("status") == "COMPLETE":
+                        if o.get("order_id") == oid and o.get("status") == "COMPLETE":
                             avg = o.get("average_price")
                             if avg and float(avg) > 0:
                                 fills[tsym] = float(avg)
@@ -721,6 +781,7 @@ class IronCondorManager:
         self.entry_time: str = ""
         self.entry_spot: float = 0.0
         self._order_ids: dict[str, str] = {}
+        self._entry_fills: dict[str, float] = {}
 
     def _get_chain(self, expiry: str):
         """Return (calls_list, puts_list, all_tsyms) for expiry."""
@@ -892,7 +953,8 @@ class IronCondorManager:
         return True
 
     def verify_fills(self) -> bool:
-        """Check all 4 legs filled; if partial, square off and abort."""
+        """Check all 4 legs filled; if partial, square off and abort.
+        On success, updates entry_credit from actual fill prices."""
         if not self.position:
             return False
         ic = self.position
@@ -903,15 +965,28 @@ class IronCondorManager:
             log.warning(f"  Could not fetch orders: {e}")
             return False
         filled = set()
+        fills: dict[str, float] = {}
         for o in orders:
             tsym = o.get("tradingsymbol", "")
             status = o.get("status", "")
             filled_qty = o.get("filled_quantity", 0)
+            avg = o.get("average_price")
             if tsym in expected and status == "COMPLETE" and filled_qty >= LOT_SIZE:
                 filled.add(tsym)
+                if avg and float(avg) > 0:
+                    fills[tsym] = float(avg)
         missing = expected - filled
         if not missing:
             telegram_logger.trade_alert(SYMBOL, "ENTER", ic.net_credit, LOT_SIZE)
+            # ── Recompute entry_credit from actual fill prices ──
+            if len(fills) == len(expected):
+                self._entry_fills = fills
+                fill_credit = 0.0
+                for leg in ic.legs:
+                    prem = fills.get(leg.tradingsymbol, 0)
+                    fill_credit += prem if leg.action == "SELL" else -prem
+                log.info(f"Entry fills — signal credit ₹{ic.net_credit:.2f} → actual fill credit ₹{fill_credit:.2f}")
+                self.entry_credit = fill_credit
             return True
         log.warning("Partial fill — squaring off")
         for leg in ic.legs:
@@ -1011,6 +1086,16 @@ class IronCondorManager:
             current += prem if leg.action == "SELL" else -prem
         pnl = (self.entry_credit - current) * LOT_SIZE
         charges = calc_charges([asdict(l) for l in self.position.legs], LOT_SIZE)
+        # Recompute with actual entry fill prices if available
+        if self._entry_fills:
+            leg_dicts = []
+            for leg in self.position.legs:
+                d = asdict(leg)
+                fp = self._entry_fills.get(leg.tradingsymbol)
+                if fp and fp > 0:
+                    d["premium"] = fp
+                leg_dicts.append(d)
+            charges = calc_charges(leg_dicts, LOT_SIZE)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
             "strategy": "IC",
@@ -1047,14 +1132,13 @@ class IronCondorManager:
         if len(nifty_opts) != 4:
             print(f"  Expected 4 NIFTY option legs, found {len(nifty_opts)}")
             return None
-        sell_qty = max(p.get("quantity", 0) for p in nifty_opts)
         legs = []
         for p in nifty_opts:
             tsym = p["tradingsymbol"]
             qty = p.get("quantity", 0)
             strike = float(p.get("strike_price", 0))
             otype = p.get("instrument_type", "")
-            action = "SELL" if abs(qty) == sell_qty else "BUY"
+            action = "SELL" if qty < 0 else "BUY"
             legs.append(IronCondorLeg(tsym, strike, otype, action, 0))
         expiries = {p.get("expiry_date", "")[:10] for p in nifty_opts}
         expiry = list(expiries)[0]
@@ -1085,6 +1169,7 @@ class CreditSpreadManager:
         self.entry_time: str = ""
         self.entry_spot: float = 0.0
         self._order_ids: dict[str, str] = {}
+        self._entry_fills: dict[str, float] = {}
 
     def _get_nifty_token(self) -> int | None:
         for exchange in ("NSE", "BSE"):
@@ -1227,6 +1312,17 @@ class CreditSpreadManager:
         self.entry_time = datetime.now().isoformat()
         self.entry_spot = cs.spot
         self._order_ids = order_ids
+        # Replace signal credit with actual fill prices
+        if is_market_open():
+            fills = self.kite.get_fill_prices(order_ids)
+            if len(fills) == len(order_ids):
+                self._entry_fills = fills
+                fill_credit = 0.0
+                for leg in cs.legs:
+                    prem = fills.get(leg.tradingsymbol, 0)
+                    fill_credit += prem if leg.action == "SELL" else -prem
+                log.info(f"CS entry fills — signal ₹{cs.net_credit:.2f} → actual ₹{fill_credit:.2f}")
+                self.entry_credit = fill_credit
         legs_dict = [asdict(l) for l in cs.legs]
         telegram_logger.strategy_entry_alert(f"CS {cs.spread_type}", legs_dict)
         return True
@@ -1309,6 +1405,15 @@ class CreditSpreadManager:
                 prem = 0
             current += prem if leg.action == "SELL" else -prem
         pnl = (self.entry_credit - current) * LOT_SIZE
+        # Compute charges using actual entry fill prices if available
+        leg_dicts = []
+        for leg in self.position.legs:
+            d = asdict(leg)
+            fp = self._entry_fills.get(leg.tradingsymbol)
+            if fp and fp > 0:
+                d["premium"] = fp
+            leg_dicts.append(d)
+        charges = calc_charges(leg_dicts, LOT_SIZE)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
             "strategy": f"CS_{self.position.spread_type}",
@@ -1320,6 +1425,7 @@ class CreditSpreadManager:
             "entry_credit": round(self.entry_credit, 2),
             "exit_value": round(current, 2),
             "pnl": round(pnl, 2),
+            "charges": charges,
             "max_profit_target": CS_PROFIT_TARGET_RS,
             "stop_loss": round(self.entry_credit * LOT_SIZE, 2),
             "exit_reason": reason,
@@ -1700,6 +1806,17 @@ class SmaCrossover:
             return False
 
         log.debug(f"ENTRY: side={side} spot={entry_price} sl={sl} target_price={target_price} risk={risk}")
+
+        # Fetch actual fill price if market order
+        fill_prem = entry_prem
+        if is_market_open() and oid:
+            import time
+            time.sleep(1)
+            fills = self.kite.get_fill_prices({tsym: oid})
+            if fills.get(tsym, 0) > 0:
+                fill_prem = fills[tsym]
+                log.debug(f"ENTRY fill: {tsym} LTP={entry_prem} fill={fill_prem}")
+
         trade = {
             "side": side,
             "entry_price": entry_price,
@@ -1711,7 +1828,7 @@ class SmaCrossover:
             "strike": opt["strike"],
             "expiry": opt["expiry"],
             "entry_ts": datetime.now().isoformat(),
-            "entry_prem": entry_prem,
+            "entry_prem": fill_prem,
         }
         self.trades.append(trade)
         self.trades_today += 1
@@ -2080,6 +2197,16 @@ class SmaCrossoverBNF:
             log.debug(f"BNF ENTER FAILED: {tsym} {e}")
             return False
 
+        # Fetch actual fill price if market order
+        fill_prem = entry_prem
+        if is_market_open() and oid:
+            import time
+            time.sleep(1)
+            fills = self.kite.get_fill_prices({tsym: oid})
+            if fills.get(tsym, 0) > 0:
+                fill_prem = fills[tsym]
+                log.debug(f"BNF ENTRY fill: {tsym} LTP={entry_prem} fill={fill_prem}")
+
         trade = {
             "side": side,
             "entry_price": entry_price,
@@ -2091,7 +2218,7 @@ class SmaCrossoverBNF:
             "strike": opt["strike"],
             "expiry": opt["expiry"],
             "entry_ts": datetime.now().isoformat(),
-            "entry_prem": entry_prem,
+            "entry_prem": fill_prem,
         }
         self.trades.append(trade)
         self.trades_today += 1
@@ -2465,6 +2592,16 @@ class NiftySMAOptions:
             "locked": False, "lock_level": 0,
         }
         self._order_ids = oids
+        # Replace signal premiums with actual fill prices
+        if is_market_open():
+            fills = self.kite.get_fill_prices(oids)
+            for leg in self.position["legs"]:
+                tsym = leg["tsym"]
+                if tsym in fills and fills[tsym] > 0:
+                    old = leg["premium"]
+                    leg["premium"] = fills[tsym]
+                    log.debug(f"N1H entry fill: {tsym} signal={old:.2f} fill={fills[tsym]:.2f}")
+            self.position["max_loss"] = self._calc_max_loss(legs)
         telegram_logger.strategy_entry_alert("N1H OPTIONS", [{
             "action": l["action"], "tradingsymbol": l["tsym"],
             "strike": l["strike"], "option_type": l["option_type"],
@@ -3277,6 +3414,14 @@ def main():
     parser.add_argument("--lots", type=int, default=1, help="Lot multiplier (e.g. 2 = 2x lot quantity)")
     parser.add_argument("--sl", type=float, default=None, help="Manual trade SL in points (e.g. 10 for ₹10)")
     args = parser.parse_args()
+
+    cfg_file = Path(CONFIG_FILE)
+    if cfg_file.exists():
+        mode = cfg_file.stat().st_mode
+        if mode & 0o007:
+            log.warning(f"kite_config.json is world-readable (mode {oct(mode)}). "
+                        f"Restrict to owner-only to keep API keys safe.")
+
     init_trade_log()
 
     global LOT_SIZE

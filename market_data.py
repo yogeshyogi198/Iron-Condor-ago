@@ -13,6 +13,20 @@ def load_config() -> dict:
     with open(CONFIG_FILE) as f:
         return json.load(f)
 
+def classify_pcr(pcr: float, price_change_pct: float = 0) -> str:
+    if pcr >= 1.30:
+        return "STRONG BULLISH"
+    if pcr >= 1.06:
+        return "WEAK BULLISH"
+    if pcr >= 0.95:
+        base = "NEUTRAL"
+        if price_change_pct > 0.5:
+            return f"{base} TO BULLISH"
+        return base
+    if pcr >= 0.75:
+        return "WEAK BEARISH"
+    return "STRONG BEARISH"
+
 def main():
     cfg = load_config()
     api_key = cfg.get("api_key", "")
@@ -116,18 +130,10 @@ def main():
             print(f"    CE OI Chg:       {ce_oi_change:>+15,}")
             print(f"    PE OI Chg:       {pe_oi_change:>+15,}")
 
-            if pcr > 1.3:
-                sentiment = "STRONG BULLISH"
-            elif pcr > 1.15:
-                sentiment = "BULLISH"
-            elif pcr > 1.0:
-                sentiment = "WEAK BULLISH"
-            elif pcr > 0.85:
-                sentiment = "WEAK BEARISH"
-            elif pcr > 0.7:
-                sentiment = "BEARISH"
-            else:
-                sentiment = "STRONG BEARISH"
+            nifty_pct = quotes.get("NSE:NIFTY 50", {}).get("net_change", 0)
+            nifty_prev = quotes.get("NSE:NIFTY 50", {}).get("ohlc", {}).get("close", 0)
+            nifty_chg = (nifty_pct / nifty_prev * 100) if nifty_prev else 0
+            sentiment = classify_pcr(pcr, nifty_chg)
             print(f"    Sentiment:       {sentiment}")
     except Exception as e:
         print(f"    Error: {e}")
