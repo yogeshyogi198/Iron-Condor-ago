@@ -29,6 +29,13 @@ from swing_config import (
     MARKET_OPEN, MARKET_CLOSE, REBALANCE_THRESHOLD,
 )
 
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    from pytz import timezone
+    IST = timezone("Asia/Kolkata")
+
 BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
 ALERTS_TODAY_FILE = BOT_DIR / ".swing_alerts_today.json"
@@ -43,10 +50,11 @@ def _load_config() -> dict:
 
 
 def is_market_open() -> bool:
-    now = datetime.now()
+    now = datetime.now(IST)
     if now.weekday() >= 5:
         return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+    t = now.time()
+    return MARKET_OPEN <= t <= MARKET_CLOSE
 
 
 def _load_alerts_today() -> set:
@@ -54,7 +62,7 @@ def _load_alerts_today() -> set:
         try:
             data = json.loads(ALERTS_TODAY_FILE.read_text())
             date = data.get("date", "")
-            if date == datetime.now().strftime("%Y-%m-%d"):
+            if date == datetime.now(IST).strftime("%Y-%m-%d"):
                 return set(data.get("symbols", []))
         except Exception:
             pass
@@ -63,7 +71,7 @@ def _load_alerts_today() -> set:
 
 def _save_alerts_today(symbols: set):
     ALERTS_TODAY_FILE.write_text(json.dumps({
-        "date": datetime.now().strftime("%Y-%m-%d"),
+        "date": datetime.now(IST).strftime("%Y-%m-%d"),
         "symbols": list(symbols),
     }))
 
@@ -71,6 +79,9 @@ def _save_alerts_today(symbols: set):
 # ── Main Monitor ───────────────────────────────────────────
 
 def main():
+    now = datetime.now(IST)
+    print(f"  Current IST time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"  Market window: {MARKET_OPEN} – {MARKET_CLOSE}")
     if not is_market_open():
         print("Market closed. Run during 9:15 AM – 3:30 PM IST.")
         return
@@ -84,7 +95,7 @@ def main():
 
     kite = KiteConnect(api_key=api_key, access_token=access_token, timeout=30)
     already_alerted = _load_alerts_today()
-    print(f"Swing Rebalancer — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"Swing Rebalancer — {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print("=" * 50)
 
     try:

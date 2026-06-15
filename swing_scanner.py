@@ -6,10 +6,10 @@ Run:  python swing_scanner.py
 Schedule via Task Scheduler: Sunday 8 PM or Monday 7:30 AM IST.
 
 Workflow:
-  1. Fetch Nifty 500 constituents (NSE API → cached locally)
+  1. Fetch Nifty 500 constituents (NSE API -> cached locally)
   2. Build instrument-token map from Kite NSE segment
-  3. For each stock: fetch daily data → resample to weekly →
-     compute all 3 confirmations → qualify / reject
+  3. For each stock: fetch daily data -> resample to weekly ->
+     compute all 3 confirmations -> qualify / reject
   4. For qualified stocks: compute SL (recent swing low) &
      target (previous swing high)
   5. Send formatted Telegram watchlist
@@ -108,7 +108,7 @@ def _build_token_map(kite: KiteConnect) -> dict[str, int]:
     for r in instruments:
         itype = r.get("instrument_type")
         tsym = r.get("tradingsymbol")
-        if tsym and itype in ("", None, "EQ"):
+        if tsym and itype == "EQ":
             result[tsym] = int(r["instrument_token"])
     return result
 
@@ -146,28 +146,24 @@ def main():
     print("Swing Scanner — Weekly Scan")
     print(f"{'='*50}")
 
-    symbols = get_nifty500_symbols()
-    # Filter out non-equity (bonds/G-secs start with digits)
-    symbols = [s for s in symbols if s and not s[0].isdigit()]
-    if not symbols:
-        print("  Fetching top 700 NSE equities from Kite ...")
-        try:
-            all_instruments = kite.instruments("NSE")
-            equities = sorted([
-                r["tradingsymbol"]
-                for r in all_instruments
-                if r.get("instrument_type") in ("", None, "EQ") and r.get("tradingsymbol")
-            ])
-            symbols = [s for s in equities[:500] if not s[0].isdigit()]
-            print(f"    Using top {len(symbols)} of {len(equities)} equities")
-        except Exception as e:
-            print(f"  ERROR fetching NSE instruments: {e}")
-            sys.exit(1)
-    print(f"  Universe: {len(symbols)} stocks")
-
+    # Build token map FIRST (single instruments() call)
     print("  Building token map ...")
     token_map = _build_token_map(kite)
     print(f"  Found {len(token_map)} NSE equity tokens")
+
+    # Determine universe: Nifty 500 preferred, else all equities
+    symbols = get_nifty500_symbols()
+    symbols = [s for s in symbols if s and not s[0].isdigit()]
+    if not symbols:
+        print("  Falling back to all NSE equities ...")
+        symbols = sorted([
+            s for s in token_map.keys()
+            if s and not s[0].isdigit()
+        ])
+        print(f"    Universe: {len(symbols)} stocks")
+    else:
+        print(f"  Universe: {len(symbols)} stocks")
+
     telegram_logger.send_telegram(
         f"📊 SWING SCAN started — {len(symbols)} stocks, "
         f"{len(token_map)} tokens available", level="INFO")
@@ -176,19 +172,6 @@ def main():
     errors = 0
     skipped = 0
     last_tg_progress = 0
-
-    for i, symbol in enumerate(symbols, 1):
-        token = token_map.get(symbol)
-        if token is None:
-            skipped += 1
-            continue
-        if i % 100 == 0:
-            print(f"  Progress: {i}/{len(symbols)} — {len(qualified)} qualified")
-            if i - last_tg_progress >= 200:
-                telegram_logger.send_telegram(
-                    f"📊 SWING SCAN progress: {i}/{len(symbols)} stocks, "
-                    f"{len(qualified)} qualified", level="INFO")
-                last_tg_progress = i
 
     for i, symbol in enumerate(symbols, 1):
         token = token_map.get(symbol)
@@ -240,6 +223,14 @@ def main():
         })
         print("✓ QUALIFIED")
         time.sleep(KITE_REQUEST_DELAY)
+
+        if i % 100 == 0:
+            print(f"  Progress: {i}/{len(symbols)} — {len(qualified)} qualified")
+            if i - last_tg_progress >= 200:
+                telegram_logger.send_telegram(
+                    f"📊 SWING SCAN progress: {i}/{len(symbols)} stocks, "
+                    f"{len(qualified)} qualified", level="INFO")
+                last_tg_progress = i
 
     print(f"\n{'='*50}")
     print(f"Scan complete: {len(qualified)} qualified, "
