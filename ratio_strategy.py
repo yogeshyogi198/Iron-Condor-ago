@@ -211,21 +211,29 @@ def main():
     try:
         actual_holdings = kite.holdings()
         print(f"  Holdings API returned {len(actual_holdings)} items")
-        for h in actual_holdings:
-            print(f"    {h.get('tradingsymbol')} x {h.get('quantity')}")
+        non_zero = [h for h in actual_holdings if h.get("quantity", 0) > 0]
+        if non_zero:
+            for h in non_zero:
+                print(f"    {h.get('tradingsymbol')} x {h.get('quantity')}")
+        else:
+            print("    No non-zero holdings")
         n_qty = sum(h.get("quantity", 0) + h.get("t1_quantity", 0)
                     for h in actual_holdings
                     if h.get("tradingsymbol") == NIFTYBEES_SYMBOL)
         g_qty = sum(h.get("quantity", 0) + h.get("t1_quantity", 0)
                     for h in actual_holdings
                     if h.get("tradingsymbol") == GOLDBEES_SYMBOL)
-        print(f"  NIFTYBEES qty: {n_qty}, GOLDBEES qty: {g_qty}")
+        if n_qty or g_qty:
+            print(f"  NIFTYBEES qty: {n_qty}, GOLDBEES qty: {g_qty}")
+        else:
+            print("  No ETF holdings")
         actual_holding = None
         if n_qty > 0 and g_qty > 0:
             print("  WARNING: Holding both NIFTYBEES and GOLDBEES. "
                   "Clearing state.")
             state = {"holding": None, "entry_date": "", "entry_price": 0,
                      "quantity": 0, "entry_system": None}
+            _save_state(state)
         elif n_qty > 0:
             actual_holding = NIFTYBEES_SYMBOL
         elif g_qty > 0:
@@ -237,14 +245,18 @@ def main():
             state = {"holding": actual_holding, "entry_date": "",
                      "entry_price": 0, "quantity": n_qty or g_qty,
                      "entry_system": None}
+            _save_state(state)
         elif not actual_holding and state.get("holding"):
             print(f"  Synced state: no holdings found (state had "
                   f"{state['holding']}). Clearing.")
             state = {"holding": None, "entry_date": "", "entry_price": 0,
                      "quantity": 0, "entry_system": None}
-        _save_state(state)
+            _save_state(state)
     except Exception as e:
         print(f"  Could not sync holdings: {e}")
+
+    # Reload state fresh — sync block may have partially mutated it
+    state = _load_state()
 
     print("Ratio Strategy \u2014 Turtle System 1 (20/10) + System 2 (55/20)")
     print("=" * 50)
@@ -253,7 +265,8 @@ def main():
     token_map = {}
 
     def check_and_act(send_report_only: bool = False) -> bool:
-        nonlocal state, token_map
+        nonlocal token_map
+        state = _load_state()  # fresh state every call
         now = datetime.now()
         HEARTBEAT_FILE.write_text(now.strftime("%Y-%m-%d %H:%M:%S"))
 
