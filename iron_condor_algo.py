@@ -133,7 +133,7 @@ _last_whitelist_ok: Optional[bool] = None
 _auth_failed = False
 _last_test_time: float = 0
 
-def periodic_connection_test(kite: "KiteSession"):
+def periodic_connection_test(kite: "KiteSession", exchange: str = "NFO"):
     global _last_test_time
     now = time.time()
     if now - _last_test_time < 900:
@@ -152,7 +152,7 @@ def periodic_connection_test(kite: "KiteSession"):
             qty, price, otype = LOT_SIZE, 0.05, "LIMIT"
             variety = "amo"
         kite.kite.place_order(
-            variety, exchange="NFO", tradingsymbol=tsym,
+            variety, exchange=exchange, tradingsymbol=tsym,
             transaction_type="BUY", quantity=qty, price=price,
             product="NRML", order_type=otype, validity="DAY",
         )
@@ -163,7 +163,7 @@ def periodic_connection_test(kite: "KiteSession"):
         if "margin" in msg or "funds" in msg or "insufficient" in msg:
             pass
         elif "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
-            log.warning(f"IP REJECTED during periodic test: {e}")
+            log.warning(f"IP REJECTED during periodic test on {exchange}: {e}")
         else:
             pass
 
@@ -1508,19 +1508,22 @@ class SmaCrossover:
             target_level = trade["target_level"]
             points = abs(spot - entry_price)
             is_buy = (side == "CE")
+            risk = abs(entry_price - trade["entry_sl"])
+            rr = points / risk if risk > 0 else 0
+            log.debug(f"MANAGE: {trade['tsym']} spot={spot:.2f} entry={entry_price} sl={sl} points={points:.0f} rr={rr:.2f} target_lvl={target_level}")
             if (is_buy and spot <= sl) or (not is_buy and spot >= sl):
                 print(f"  SL hit {trade['tsym']} @ {spot:.2f}, closing")
+                log.debug(f"SL HIT: {trade['tsym']} spot={spot:.2f} sl={sl}")
                 self._exit_trade(trade)
                 to_remove.append(trade)
             else:
-                risk = abs(entry_price - trade["entry_sl"])
-                rr = points / risk if risk > 0 else 0
                 if rr >= target_level + 1:
                     new_sl = entry_price + (target_level + 1) * risk if is_buy else entry_price - (target_level + 1) * risk
                     if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
                         trade["sl"] = new_sl
                         trade["target_level"] = target_level + 1
                         print(f"  Trail {trade['tsym']} SL to {new_sl:.2f} (RR {target_level+1}:1)")
+                        log.debug(f"TRAIL: {trade['tsym']} new_sl={new_sl:.2f} rr_target={target_level+1}")
         for t in to_remove:
             if t in self.trades:
                 self.trades.remove(t)
@@ -1533,14 +1536,18 @@ class SmaCrossover:
         try:
             oid = self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=SENSEX_EXCHANGE)
             print(f"  Closed {tsym}")
+            log.debug(f"EXIT: placed market order {tsym} oid={oid}")
         except Exception as e:
             print(f"  Close error: {e}")
+            log.debug(f"EXIT FAILED: {tsym} {e}")
         exit_prem = 0
         if oid:
             fills = self.kite.get_fill_prices({tsym: oid})
             exit_prem = fills.get(tsym, 0)
+            log.debug(f"EXIT: fill price for {tsym} = {exit_prem}")
         entry_prem = trade.get("entry_prem", 0)
         pnl = (entry_prem - exit_prem) * qty if trade["side"] == "CE" else (exit_prem - entry_prem) * qty
+        log.debug(f"EXIT: {tsym} entry_prem={entry_prem} exit_prem={exit_prem} pnl={pnl}")
         charges = calc_charges([{"action": "BUY", "premium": entry_prem}], qty, exchange=SENSEX_EXCHANGE)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
@@ -1609,14 +1616,17 @@ class SmaCrossover:
                 time.sleep(5)
                 continue
 
+            log.debug(f"SMA: spot={spot:.0f} price={current_price:.2f} sma={sma:.2f} price_above={price_above} prev_above={prev_above} last_cross={last_cross}")
             if price_above and not prev_above:
                 if last_cross != "CE":
+                    log.debug(f"CROSSOVER CE detected — entering trade")
                     opt = self._get_atm_option(spot, is_ce=True)
                     if opt and self._enter_trade(opt, "CE", candles[-1]):
                         return True
                 last_cross = "CE"
             elif not price_above and prev_above:
                 if last_cross != "PE":
+                    log.debug(f"CROSSOVER PE detected — entering trade")
                     opt = self._get_atm_option(spot, is_ce=False)
                     if opt and self._enter_trade(opt, "PE", candles[-1]):
                         return True
@@ -1655,12 +1665,16 @@ class SmaCrossover:
         try:
             if is_market_open():
                 oid = self.kite.place_market(tsym, side_str, qty, exchange=SENSEX_EXCHANGE)
+                log.debug(f"ENTER: market {side_str} {tsym} x{qty} premium={entry_prem} oid={oid}")
             else:
                 oid = self.kite.place_limit(tsym, side_str, qty, entry_prem or 100, exchange=SENSEX_EXCHANGE)
+                log.debug(f"ENTER: limit {side_str} {tsym} x{qty} @{entry_prem} oid={oid}")
         except Exception as e:
             print(f"  ✗ {tsym}: {e}")
+            log.debug(f"ENTER FAILED: {tsym} {e}")
             return False
 
+        log.debug(f"ENTRY: side={side} spot={entry_price} sl={sl} target_price={target_price} risk={risk}")
         trade = {
             "side": side,
             "entry_price": entry_price,
@@ -1719,7 +1733,7 @@ class SmaCrossover:
 
         while True:
             monitor_ip_status(self.kite)
-            periodic_connection_test(self.kite)
+            periodic_connection_test(self.kite, SENSEX_EXCHANGE)
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
 
@@ -1727,19 +1741,26 @@ class SmaCrossover:
             session1_can_enter = self.trades_today < 1 and active_count < 1
             session2_can_enter = self.trades_today < 2 and active_count < 2
 
+            log.debug(f"LOOP: time={now.strftime('%H:%M:%S')} active_trades={active_count} s1_done={self.session1_done} s2_done={self.session2_done} trades_today={self.trades_today}")
+
             # If past Session 1 window (11:30), mark it done
             if not self.session1_done and (now.hour > 11 or (now.hour == 11 and now.minute > 30)):
                 self.session1_done = True
+                log.debug("Session 1 window closed")
 
             # Session 1: 9:30-11:30 (only if no carryover trade active)
             if session1_can_enter and not self.session1_done and self._in_session1(now):
+                log.debug("Starting Session 1 crossover watch")
                 if self._wait_for_crossover("S1"):
                     self.session1_done = True
+                    log.debug("Session 1 trade entered")
 
             # Session 2: 1:00-2:30
             if session2_can_enter and not self.session2_done and self._in_session2(now) and self.session1_done:
+                log.debug("Starting Session 2 crossover watch")
                 if self._wait_for_crossover("S2"):
                     self.session2_done = True
+                    log.debug("Session 2 trade entered")
 
             # Manage all active trades — trail SL for all
             if self.trades:
@@ -2210,7 +2231,7 @@ class SmaCrossoverBNF:
 
         while True:
             monitor_ip_status(self.kite)
-            periodic_connection_test(self.kite)
+            periodic_connection_test(self.kite, self.BNF_EXCHANGE)
             now = datetime.now()
 
             active_count = sum(1 for t in self.trades if self._trade_has_position(t))
@@ -2533,7 +2554,7 @@ class NiftySMAOptions:
 
         while True:
             monitor_ip_status(self.kite)
-            periodic_connection_test(self.kite)
+            periodic_connection_test(self.kite, N1H_EXCHANGE)
             now = datetime.now()
 
             # ── ENTRY PHASE ──
