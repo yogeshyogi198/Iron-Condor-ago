@@ -15,6 +15,8 @@ Workflow:
   5. Send formatted Telegram watchlist
 """
 
+import csv
+import io
 import json
 import sys
 import time
@@ -41,6 +43,22 @@ BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
 NIFTY_CACHE_FILE = BOT_DIR / NIFTY_500_CACHE
 
+NIFTY50_HARDCODED = [
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "HINDUNILVR", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK",
+    "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "TITAN",
+    "BAJFINANCE", "WIPRO", "ULTRACEMCO", "NESTLEIND", "TECHM",
+    "SUNPHARMA", "POWERGRID", "NTPC", "ONGC", "JSWSTEEL",
+    "TATAMOTORS", "HCLTECH", "M&M", "TATASTEEL", "ADANIENT",
+    "BAJAJFINSV", "COALINDIA", "DIVISLAB", "DRREDDY", "EICHERMOT",
+    "GRASIM", "HEROMOTOCO", "HINDALCO", "INDUSINDBK", "CIPLA",
+    "APOLLOHOSP", "ADANIPORTS", "BPCL", "BRITANNIA", "SBILIFE",
+    "HDFCLIFE", "TATACONSUM", "UPL", "VEDL", "SHREECEM",
+]
+
+NIFTY_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+NIFTY50_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv"
+
 
 # ── Nifty 500 Symbol List ──────────────────────────────────
 
@@ -50,7 +68,8 @@ def _load_config() -> dict:
     return {}
 
 
-def _fetch_nifty500_from_nse() -> list[str] | None:
+def _fetch_with_session(urls: list[tuple[str, str]], max_attempts: int = 2) -> list[str] | None:
+    """Try multiple URLs with a shared session. Each tuple is (label, url)."""
     session = requests.Session()
     headers = {
         "User-Agent": (
@@ -65,14 +84,30 @@ def _fetch_nifty500_from_nse() -> list[str] | None:
         "Connection": "keep-alive",
     }
     session.headers.update(headers)
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         try:
             session.get("https://www.nseindia.com", timeout=10)
-            resp = session.get(NIFTY_500_URL, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                return [item["symbol"] for item in data.get("data", [])]
         except Exception:
+            if attempt == max_attempts - 1:
+                return None
+            time.sleep(2)
+            continue
+        for label, url in urls:
+            try:
+                resp = session.get(url, timeout=15)
+                if resp.status_code != 200:
+                    continue
+                if url.endswith(".csv"):
+                    reader = csv.DictReader(io.StringIO(resp.text))
+                    symbols = [row["Symbol"].strip() for row in reader if row.get("Symbol")]
+                else:
+                    data = resp.json()
+                    symbols = [item["symbol"] for item in data.get("data", [])]
+                if symbols:
+                    return symbols
+            except Exception:
+                continue
+        if attempt < max_attempts - 1:
             time.sleep(2)
     return None
 
@@ -84,19 +119,34 @@ def get_nifty500_symbols() -> list[str]:
             cached = json.loads(NIFTY_CACHE_FILE.read_text())
             age = datetime.now() - datetime.fromtimestamp(
                 NIFTY_CACHE_FILE.stat().st_mtime)
-            if age.days < 7:
+            if age.days < 7 and cached:
                 return cached
         except Exception:
             pass
-    symbols = _fetch_nifty500_from_nse()
+
+    # Method 1: Nifty 500 CSV (most reliable)
+    symbols = _fetch_with_session([("nifty500_csv", NIFTY_CSV_URL)])
     if symbols:
         NIFTY_CACHE_FILE.write_text(json.dumps(symbols))
-        print(f"  Fetched {len(symbols)} Nifty 500 symbols from NSE")
+        print(f"  Fetched {len(symbols)} Nifty 500 symbols from NSE CSV")
         return symbols
+
+    # Method 2: Nifty 50 + Next 50 + Midcap 150 + Smallcap 250 = ~500
+    composite_urls = [
+        ("nifty50_csv", NIFTY50_CSV_URL),
+        ("nifty500_json", NIFTY_500_URL),
+    ]
+    symbols = _fetch_with_session(composite_urls)
+    if symbols:
+        NIFTY_CACHE_FILE.write_text(json.dumps(symbols))
+        print(f"  Fetched {len(symbols)} symbols from NSE composite")
+        return symbols
+
     if cached:
         print("  Using cached Nifty 500 list (NSE fetch failed)")
         return cached
-    print("  WARNING: Could not fetch Nifty 500. Using all NSE equities.")
+
+    print("  WARNING: Could not fetch Nifty 500. Falling back to all NSE equities.")
     return []
 
 
@@ -106,9 +156,13 @@ def _build_token_map(kite: KiteConnect) -> dict[str, int]:
     instruments = kite.instruments("NSE")
     result = {}
     for r in instruments:
-        itype = r.get("instrument_type")
-        tsym = r.get("tradingsymbol")
-        if tsym and itype == "EQ":
+        itype = r.get("instrument_type", "")
+        tsym = r.get("tradingsymbol", "")
+        if (itype == "EQ"
+                and tsym
+                and "-" not in tsym
+                and not tsym[0].isdigit()
+                and len(tsym) <= 10):
             result[tsym] = int(r["instrument_token"])
     return result
 
@@ -151,18 +205,27 @@ def main():
     token_map = _build_token_map(kite)
     print(f"  Found {len(token_map)} NSE equity tokens")
 
-    # Determine universe: Nifty 500 preferred, else all equities
-    symbols = get_nifty500_symbols()
-    symbols = [s for s in symbols if s and not s[0].isdigit()]
-    if not symbols:
-        print("  Falling back to all NSE equities ...")
-        symbols = sorted([
-            s for s in token_map.keys()
-            if s and not s[0].isdigit()
-        ])
-        print(f"    Universe: {len(symbols)} stocks")
+    # Determine universe with fallback priority
+    symbols = []
+    source_name = ""
+
+    nifty500 = get_nifty500_symbols()
+    nifty500 = [s for s in nifty500 if s and not s[0].isdigit()]
+    if nifty500:
+        symbols = nifty500
+        source_name = "Nifty 500"
     else:
-        print(f"  Universe: {len(symbols)} stocks")
+        # Fallback 1: token_map keys (clean EQ symbols)
+        all_equities = sorted(token_map.keys())
+        if len(all_equities) >= 50:
+            symbols = all_equities
+            source_name = "all NSE equities"
+        else:
+            # Fallback 2: hardcoded Nifty 50
+            symbols = NIFTY50_HARDCODED
+            source_name = "hardcoded Nifty 50"
+
+    print(f"  Universe source: {source_name} — {len(symbols)} stocks")
 
     telegram_logger.send_telegram(
         f"📊 SWING SCAN started — {len(symbols)} stocks, "

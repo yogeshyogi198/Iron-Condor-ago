@@ -21,6 +21,13 @@ from kiteconnect import KiteConnect
 
 import telegram_logger
 
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    from pytz import timezone
+    IST = timezone("Asia/Kolkata")
+
 BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
 STATE_FILE = BOT_DIR / "ratio_state.json"
@@ -37,6 +44,7 @@ EXIT_WINDOW_2 = 20
 CHECK_HOUR = 15
 CHECK_MINUTE = 31
 LOOP_SLEEP = 60
+OUTSIDE_SLEEP = 300
 
 
 def _load_config() -> dict:
@@ -158,6 +166,44 @@ def _channel(ratios: list, window: int):
     return max(chunk), min(chunk)
 
 
+def _is_market_open_now() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    from datetime import time as dtime
+    return dtime(9, 15) <= t <= dtime(15, 30)
+
+
+def _sync_holdings(kite: KiteConnect, current_state: dict) -> dict:
+    """Fetch actual Zerodha holdings and return corrected state."""
+    try:
+        actual = kite.holdings()
+        n_qty = sum(h.get("quantity", 0) + h.get("t1_quantity", 0)
+                    for h in actual
+                    if h.get("tradingsymbol") == NIFTYBEES_SYMBOL)
+        g_qty = sum(h.get("quantity", 0) + h.get("t1_quantity", 0)
+                    for h in actual
+                    if h.get("tradingsymbol") == GOLDBEES_SYMBOL)
+        actual_holding = None
+        if n_qty > 0 and g_qty > 0:
+            actual_holding = None
+        elif n_qty > 0:
+            actual_holding = NIFTYBEES_SYMBOL
+        elif g_qty > 0:
+            actual_holding = GOLDBEES_SYMBOL
+        if actual_holding and current_state.get("holding") != actual_holding:
+            return {"holding": actual_holding, "entry_date": "",
+                    "entry_price": 0, "quantity": n_qty or g_qty,
+                    "entry_system": None}
+        if not actual_holding and current_state.get("holding"):
+            return {"holding": None, "entry_date": "", "entry_price": 0,
+                    "quantity": 0, "entry_system": None}
+    except Exception:
+        pass
+    return current_state
+
+
 def _send_report(current_ratio: float, s1: dict, s2: dict,
                  state: dict, mode: str, signal: str = "",
                  action_detail: str = ""):
@@ -263,15 +309,26 @@ def main():
     print(f"Current holding: {state['holding'] or 'None'}")
 
     token_map = {}
+    _sync_counter = 0
 
     def check_and_act(send_report_only: bool = False) -> bool:
-        nonlocal token_map
+        nonlocal token_map, _sync_counter
         state = _load_state()  # fresh state every call
         now = datetime.now()
         HEARTBEAT_FILE.write_text(now.strftime("%Y-%m-%d %H:%M:%S"))
 
         if now.weekday() >= 5 and not send_report_only:
             return False
+
+        # Periodic re-sync with actual holdings (every 10 checks)
+        _sync_counter += 1
+        if _sync_counter % 10 == 0 and not send_report_only:
+            synced = _sync_holdings(kite, state)
+            if synced != state:
+                print(f"  Re-synced state from holdings: "
+                      f"holding={synced.get('holding') or 'None'}")
+                state = synced
+                _save_state(state)
 
         print(f"\n[{now.strftime('%H:%M:%S')}] Checking ratio...")
 
@@ -312,16 +369,21 @@ def main():
         current_ratio = n_ltp / g_ltp
         ratios = [n / g for n, g in zip(close_n, close_g)]
 
-        # Compute both systems
+        # Include today's closing price in entry channel computation
+        # so breakout detection works after market close.
+        # Exit channels use only historical data (exclude today).
+        ratios_with_today = ratios + [current_ratio]
+
         s1 = {}
-        s1["entry_high"], s1["entry_low"] = _channel(ratios, ENTRY_WINDOW_1)
+        s1["entry_high"], s1["entry_low"] = _channel(ratios_with_today, ENTRY_WINDOW_1)
         s1["exit_high"], s1["exit_low"] = _channel(ratios, EXIT_WINDOW_1)
 
         s2 = {}
-        s2["entry_high"], s2["entry_low"] = _channel(ratios, ENTRY_WINDOW_2)
+        s2["entry_high"], s2["entry_low"] = _channel(ratios_with_today, ENTRY_WINDOW_2)
         s2["exit_high"], s2["exit_low"] = _channel(ratios, EXIT_WINDOW_2)
 
-        print(f"  Ratio: {current_ratio:.4f}")
+        market_status = "LIVE" if _is_market_open_now() else "CLOSED"
+        print(f"  Ratio: {current_ratio:.4f} [{market_status}]")
         print(f"  S1 20d H:{s1['entry_high']:.4f} L:{s1['entry_low']:.4f}")
         print(f"  S1 10d H:{s1['exit_high']:.4f} L:{s1['exit_low']:.4f}")
         print(f"  S2 55d H:{s2['entry_high']:.4f} L:{s2['entry_low']:.4f}")
@@ -451,21 +513,21 @@ def main():
 
     while True:
         try:
-            now = datetime.now()
-            HEARTBEAT_FILE.write_text(now.strftime("%Y-%m-%d %H:%M:%S"))
+            now_ist = datetime.now(IST)
+            HEARTBEAT_FILE.write_text(now_ist.strftime("%Y-%m-%d %H:%M:%S"))
 
-            if now.weekday() >= 5:
+            # Only run full check during 15:31-15:45 IST window on weekdays
+            is_check_window = (
+                now_ist.weekday() < 5 and
+                now_ist.hour == CHECK_HOUR and
+                CHECK_MINUTE <= now_ist.minute <= 45
+            )
+
+            if is_check_window:
+                check_and_act()
                 time.sleep(LOOP_SLEEP)
-                continue
-
-            if now.hour < CHECK_HOUR or (now.hour == CHECK_HOUR
-                                         and now.minute < CHECK_MINUTE):
-                time.sleep(LOOP_SLEEP)
-                continue
-
-            check_and_act()
-
-            time.sleep(LOOP_SLEEP)
+            else:
+                time.sleep(OUTSIDE_SLEEP)
 
         except KeyboardInterrupt:
             print("\n  Graceful exit.")
