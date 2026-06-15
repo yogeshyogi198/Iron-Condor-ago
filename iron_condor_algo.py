@@ -16,6 +16,7 @@ import atexit
 import csv
 import io
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -51,6 +52,8 @@ import requests
 from kiteconnect import KiteConnect
 
 import telegram_logger
+
+log: logging.Logger = None  # set up in main()
 
 # ---------------------------------------------------------------------------
 # Persisted config
@@ -161,7 +164,7 @@ def periodic_connection_test(kite: "KiteSession"):
         if "margin" in msg or "funds" in msg or "insufficient" in msg:
             pass
         elif "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
-            print(f"  ⚠ IP REJECTED during periodic test: {e}")
+            log.warning(f"IP REJECTED during periodic test: {e}")
         else:
             pass
 
@@ -222,7 +225,7 @@ def heartbeat():
         _last_known_ipv6 = ip6_local
     if len(changed) == 2:
         msg = f"Both IPs changed:\n{changed[0]}\n{changed[1]}\nUpdate Zerodha whitelist."
-        print(f"  ⚠ {msg}")
+        log.warning(msg)
     ips = "/".join(filter(None, [ip6_local, ip4]))
     now_str += f"  {ips}" if ips else ""
     if _auth_failed:
@@ -255,14 +258,14 @@ def acquire_lock(lock_file: str) -> bool:
         except (ValueError, TypeError):
             pid_int = None
         if pid_int and _is_pid_running(pid_int):
-            print(f"Another instance (PID {pid_int}) already running. Exiting.")
+            log.warning(f"Another instance (PID {pid_int}) already running. Exiting.")
             return False
         crashed = True
     with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
     atexit.register(lambda: os.remove(lock_file) if os.path.exists(lock_file) else None)
     if crashed:
-        print("Iron Condor Bot crashed and will restart.\nCheck .bot_heartbeat.txt for last activity.")
+        log.warning("Iron Condor Bot crashed and will restart. Check .bot_heartbeat.txt for last activity.")
     return True
 
 def init_trade_log():
@@ -333,6 +336,13 @@ def is_market_open() -> bool:
     if now.weekday() >= 5:
         return False
     return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+
+def wait_for_market_open():
+    """Block until market opens, then notify via Telegram."""
+    while not is_market_open():
+        time.sleep(60)
+    log.info("Market is now OPEN")
+    telegram_logger.send_telegram("🔔 Market is now OPEN", level="INFO")
 
 class KiteSession:
     def __init__(self, static_id: str = ""):
@@ -825,7 +835,7 @@ class IronCondorManager:
         is_0dte = ic.expiry == datetime.now().strftime("%Y-%m-%d")
         target_str = "short premium ≤ ₹2" if is_0dte else f"₹{PROFIT_TARGET_RS:.0f} profit"
 
-        print(f"\nENTER — Credit ₹{ic.net_credit:.2f}  Target: {target_str}")
+        log.info(f"ENTER — Credit ₹{ic.net_credit:.2f}  Target: {target_str}")
 
         order_ids: dict[str, str] = {}
         buy_legs = [l for l in ic.legs if l.action == "BUY"]
@@ -871,7 +881,7 @@ class IronCondorManager:
         try:
             orders = self.kite.kite.orders()
         except Exception as e:
-            print(f"  Could not fetch orders: {e}")
+            log.warning(f"  Could not fetch orders: {e}")
             return False
         filled = set()
         for o in orders:
@@ -884,7 +894,7 @@ class IronCondorManager:
         if not missing:
             telegram_logger.trade_alert(SYMBOL, "ENTER", ic.net_credit, LOT_SIZE)
             return True
-        print("Partial fill — squaring off")
+        log.warning("Partial fill — squaring off")
         for leg in ic.legs:
             if leg.tradingsymbol in filled:
                 reverse = "BUY" if leg.action == "SELL" else "SELL"
@@ -961,7 +971,7 @@ class IronCondorManager:
     def exit(self, reason: str):
         if not self.position:
             return
-        print(f"\nEXIT ({reason})")
+        log.info(f"EXIT ({reason})")
         exit_spot = self.kite.get_nse_spot()
         quotes = self.kite.get_quotes([leg.tradingsymbol for leg in self.position.legs])
         current = 0.0
@@ -994,7 +1004,7 @@ class IronCondorManager:
         })
         telegram_logger.pnl_alert(pnl, trade_id="IC_" + self.position.expiry)
         telegram_logger.trade_alert(SYMBOL, reason, abs(current), LOT_SIZE)
-        print("Position closed.")
+        log.info("Position closed.")
         self.position = None
         self.entry_credit = 0.0
 
@@ -1153,7 +1163,7 @@ class CreditSpreadManager:
     def enter(self, cs: CreditSpread) -> bool:
         is_0dte = cs.expiry == datetime.now().strftime("%Y-%m-%d")
         target_str = "short prem ≤ ₹2" if is_0dte else f"₹{CS_PROFIT_TARGET_RS} profit"
-        print(f"\nENTER {cs.spread_type} — Credit ₹{cs.net_credit:.2f}  Target: {target_str}")
+        log.info(f"ENTER {cs.spread_type} — Credit ₹{cs.net_credit:.2f}  Target: {target_str}")
         order_ids: dict = {}
         buy_legs = [l for l in cs.legs if l.action == "BUY"]
         sell_legs = [l for l in cs.legs if l.action == "SELL"]
@@ -1162,7 +1172,7 @@ class CreditSpreadManager:
                 oid = self.kite.place_market(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
                 order_ids[leg.tradingsymbol] = oid
             except Exception as e:
-                print(f"  ✗ BUY fail: {e}")
+                log.warning(f"  BUY fail: {e}")
                 return False
         if is_market_open():
             time.sleep(3)
@@ -1174,17 +1184,17 @@ class CreditSpreadManager:
             except Exception:
                 pass
             if expected:
-                print("  Protection not filled. Aborting.")
+                log.warning("  Protection not filled. Aborting.")
                 self._square_off(buy_legs, order_ids)
                 return False
 
-        print("Phase 2 — Premium (SELL)...")
+        log.info("Phase 2 — Premium (SELL)...")
         for leg in sell_legs:
             try:
                 oid = self.kite.place_market(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
                 order_ids[leg.tradingsymbol] = oid
             except Exception as e:
-                print(f"  ✗ SELL fail: {e}")
+                log.warning(f"  SELL fail: {e}")
                 self._square_off(buy_legs, order_ids)
                 return False
         self.position = cs
@@ -1254,7 +1264,7 @@ class CreditSpreadManager:
     def exit(self, reason: str):
         if not self.position:
             return
-        print(f"\n{'='*50}\nEXIT ({reason})\n{'='*50}")
+        log.info(f"EXIT ({reason})")
         exit_spot = self.kite.get_nse_spot()
         quotes = self.kite.get_quotes([l.tradingsymbol for l in self.position.legs])
         current = 0.0
@@ -1285,7 +1295,7 @@ class CreditSpreadManager:
         })
         telegram_logger.pnl_alert(pnl, trade_id="CS_" + self.position.expiry)
         telegram_logger.trade_alert(SYMBOL, reason, abs(current), LOT_SIZE)
-        print("Position closed.")
+        log.info("Position closed.")
         self.position = None
         self.entry_credit = 0.0
 
@@ -2612,13 +2622,13 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
     cfg = load_config()
 
     if args.resume:
-        print("Scanning live Zerodha positions for credit spread...")
+        log.info("Scanning live Zerodha positions for credit spread...")
         cs = manager.resume_from_positions()
         if not cs:
             return
         manager.position = cs
         manager.entry_credit = cs.net_credit
-        print(f"Resumed {cs.spread_type}, credit ₹{cs.net_credit:.2f}")
+        log.info(f"Resumed {cs.spread_type}, credit ₹{cs.net_credit:.2f}")
 
     if cfg.get("cs_position") and not args.resume:
         p = cfg["cs_position"]
@@ -2654,14 +2664,14 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                     return
                 trend = manager._detect_trend()
                 if trend and (trend["ranging"] or not trend["trending"]):
-                    print("Ranging — fallback to IC...")
+                    log.warning("Ranging — fallback to IC...")
                     ic_manager = IronCondorManager(kite)
                     ic = ic_manager.scan()
                     if ic:
                         balance = kite.get_balance()
                         required = ic.max_loss()
                         if balance < required:
-                            print(f"  Margin ₹{balance:,.0f} < ₹{required:,.0f}. Retry...")
+                            log.warning(f"  Margin ₹{balance:,.0f} < ₹{required:,.0f}. Retry...")
                             time.sleep(60)
                             cs = manager.scan()
                             continue
@@ -2670,20 +2680,19 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                         save_config({**load_config(), "position": pos_entry})
                         ok = ic_manager.enter(ic)
                         if not ok:
-                            print("IC fail, retry CS...")
+                            log.warning("IC fail, retry CS...")
                             time.sleep(60)
                             cs = manager.scan()
                             continue
                         if not is_market_open():
-                            print("AMO, waiting market open...")
-                            while not is_market_open():
-                                time.sleep(60)
+                            log.info("AMO, waiting market open...")
+                            wait_for_market_open()
                             time.sleep(30)
                             if not ic_manager.verify_fills():
                                 c = load_config()
                                 c.pop("position", None)
                                 save_config(c)
-                                print("IC fills fail, retry CS...")
+                                log.warning("IC fills fail, retry CS...")
                                 time.sleep(60)
                                 cs = manager.scan()
                                 continue
@@ -2693,12 +2702,12 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                                 c = load_config()
                                 c.pop("position", None)
                                 save_config(c)
-                                print("IC fills fail, retry CS...")
+                                log.warning("IC fills fail, retry CS...")
                                 time.sleep(60)
                                 cs = manager.scan()
                                 continue
                         target_str = "short premium ≤ ₹2" if ic.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{PROFIT_TARGET_RS} profit"
-                        print(f"IC monitor ({target_str}, SL @ credit)")
+                        log.info(f"IC monitor ({target_str}, SL @ credit)")
                         try:
                             while True:
                                 monitor_ip_status(kite)
@@ -2717,7 +2726,7 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                             telegram_logger.error_alert("IC (CS fallback) Strategy", str(e))
                             raise
                     else:
-                        print("No IC either, retry CS...")
+                        log.warning("No IC either, retry CS...")
                 else:
                     print("No setup, retry 60s...")
                 time.sleep(60)
@@ -2730,8 +2739,7 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
             required = cs.max_loss()
             print(f"\nBalance: ₹{balance:,.0f}  Required: ₹{required:,.0f}")
             if balance < required:
-                print(f"  Insufficient margin. Need ₹{required:,.0f}")
-                print("  Waiting 60s then retrying scan...")
+                log.warning(f"  Insufficient margin. Need ₹{required:,.0f}. Waiting 60s then retrying scan...")
                 time.sleep(60)
                 continue
             pos_entry = {"expiry": cs.expiry, "entry_credit": cs.net_credit,
@@ -2739,16 +2747,15 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
             save_config({**load_config(), "cs_position": pos_entry})
             ok = manager.enter(cs)
             if not ok:
-                print("  Entry failed. Cleaning up and retrying in 60s...")
+                log.warning("  Entry failed. Cleaning up and retrying in 60s...")
                 c = load_config()
                 c.pop("cs_position", None)
                 save_config(c)
                 time.sleep(60)
                 continue
             if not is_market_open():
-                print("AMO placed. Waiting for market open...")
-                while not is_market_open():
-                    time.sleep(60)
+                log.info("AMO placed. Waiting for market open...")
+                wait_for_market_open()
                 time.sleep(30)
             else:
                 time.sleep(5)
@@ -2761,7 +2768,7 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
             except Exception:
                 pass
             if expected:
-                print("Not all legs filled. Squaring off and retrying...")
+                log.warning("Not all legs filled. Squaring off and retrying...")
                 manager.exit("PARTIAL_FILL")
                 c = load_config()
                 c.pop("cs_position", None)
@@ -2770,11 +2777,11 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                 manager.entry_credit = 0.0
                 time.sleep(60)
                 continue
-            print("All legs filled ✓")
+            log.info("All legs filled ✓")
             break
 
     target_str = "short prem ≤ ₹2" if manager.position.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{CS_PROFIT_TARGET_RS} profit"
-    print(f"Monitoring every 10s. Target: {target_str}, SL at credit.")
+    log.info(f"Monitoring every 10s. Target: {target_str}, SL at credit.")
     try:
         while True:
             monitor_ip_status(kite)
@@ -3014,13 +3021,13 @@ def _run_manual_trade(kite: KiteSession, args):
     if args.resume and manager.init_from_config():
         pass
     elif manager.init_from_config():
-        print("  Saved manual trade found. Resuming...")
+        log.info("  Saved manual trade found. Resuming...")
     else:
         ok = manager.start()
         if not ok:
             return
 
-    print("  Monitoring every 60s. Trailing SL active.")
+    log.info("  Monitoring every 60s. Trailing SL active.")
     try:
         while True:
             monitor_ip_status(kite)
@@ -3030,7 +3037,7 @@ def _run_manual_trade(kite: KiteSession, args):
             time.sleep(10)
             action = manager.monitor()
             if action in ("EXIT_SL",):
-                print("Done.")
+                log.info("Done.")
                 return
     except Exception as e:
         telegram_logger.error_alert("Manual Trade", str(e))
@@ -3100,15 +3107,17 @@ def monitor_ip_status(kite: "KiteSession"):
         changed.append(f"IPv6: {_last_known_ipv6 or 'N/A'} → {v6}")
         _last_known_ipv6 = v6
     if changed:
-        print(f"  ⚠ IP changed:\n" + "\n".join(changed))
+        log.warning("IP changed:\n" + "\n".join(changed))
     result = check_ip_whitelist(kite)
     if result is False:
-        print("  ✗ IP is NOT whitelisted. Fix immediately to avoid trade failures.")
+        log.warning("IP is NOT whitelisted. Fix immediately to avoid trade failures.")
     elif result is True:
         pass  # silent when OK
     heartbeat()
 
 def main():
+    global log
+    log = telegram_logger.setup_logger(min_telegram_level=logging.INFO)
     telegram_logger.enable_crash_alerts()
     import argparse
     parser = argparse.ArgumentParser(description="Auto Trading Bot — NIFTY / SENSEX")
@@ -3145,7 +3154,7 @@ def main():
 
     # Normal run — no prompts, just execute
     if not kite.is_authenticated():
-        print("Not logged in. Run with --login first.")
+        log.error("Not logged in. Run with --login first.")
         return
 
     cfg = load_config()
@@ -3157,13 +3166,13 @@ def main():
     except Exception as e:
         msg = str(e).lower()
         if "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
-            print(f"IP not whitelisted: {e}")
+            log.warning(f"IP not whitelisted: {e}")
 
     if args.test_ip:
         try:
             instruments = kite.get_option_instruments()
             if not instruments:
-                print("IP check: no instruments")
+                log.warning("IP check: no instruments")
                 return
             tsym = instruments[0]["tradingsymbol"]
             kite.kite.place_order(
@@ -3174,9 +3183,9 @@ def main():
         except Exception as e:
             msg = str(e).lower()
             if "margin" in msg or "funds" in msg or "insufficient" in msg:
-                print("  IP: whitelisted")
+                log.info("  IP: whitelisted")
             else:
-                print(f"  IP: {e}")
+                log.warning(f"  IP: {e}")
         return
 
     # Strategy dispatch
@@ -3228,18 +3237,18 @@ def main():
 
     # Handle --resume: scan live Zerodha positions
     if args.resume:
-        print("Scanning live Zerodha positions...")
+        log.info("Scanning live Zerodha positions...")
         ic = manager.resume_from_positions()
         if not ic:
             return
         manager.position = ic
         manager.entry_credit = ic.net_credit
-        print(f"Resumed {len(ic.legs)} legs, estimated credit ₹{ic.net_credit:.2f}")
+        log.info(f"Resumed {len(ic.legs)} legs, estimated credit ₹{ic.net_credit:.2f}")
 
     # Check if already in a position (from bot config)
     if cfg.get("position") and not args.resume:
         existing_pos = cfg["position"]
-        print("Existing position found. Resuming...")
+        log.info("Existing position found. Resuming...")
         legs = [IronCondorLeg(**l) for l in existing_pos["legs"]]
         ic = IronCondor(spot=0, expiry=existing_pos["expiry"], legs=legs,
                         net_credit=existing_pos["entry_credit"], width=0,
@@ -3260,7 +3269,7 @@ def main():
             now = datetime.now()
             target = now.replace(hour=10, minute=0, second=0, microsecond=0)
             if now < target:
-                print(f"Waiting until 10:00 AM ({((target-now).total_seconds()):.0f}s)...")
+                log.info(f"Waiting until 10:00 AM ({((target-now).total_seconds()):.0f}s)...")
                 while datetime.now() < target:
                     time.sleep(30)
 
@@ -3280,7 +3289,7 @@ def main():
             balance = kite.get_balance()
             required = ic.max_loss()
             if balance < required:
-                print(f"  Insufficient margin ₹{balance:,.0f} < ₹{required:,.0f}. Retry 60s...")
+                log.warning(f"  Insufficient margin ₹{balance:,.0f} < ₹{required:,.0f}. Retry 60s...")
                 time.sleep(60)
                 continue
 
@@ -3292,7 +3301,7 @@ def main():
 
             ok = manager.enter(ic)
             if not ok:
-                print("  Entry failed. Cleanup retry 60s...")
+                log.warning("  Entry failed. Cleanup retry 60s...")
                 c = load_config()
                 c.pop("position", None)
                 save_config(c)
@@ -3301,12 +3310,11 @@ def main():
                 continue
 
             if not is_market_open():
-                print("  AMO placed, waiting market open...")
-                while not is_market_open():
-                    time.sleep(60)
+                log.info("  AMO placed, waiting market open...")
+                wait_for_market_open()
                 time.sleep(30)
                 if not manager.verify_fills():
-                    print("  Fills failed. Cleanup retry...")
+                    log.warning("  Fills failed. Cleanup retry...")
                     c = load_config()
                     c.pop("position", None)
                     save_config(c)
@@ -3317,7 +3325,7 @@ def main():
             else:
                 time.sleep(5)
                 if not manager.verify_fills():
-                    print("  Fills failed. Cleanup retry...")
+                    log.warning("  Fills failed. Cleanup retry...")
                     c = load_config()
                     c.pop("position", None)
                     save_config(c)
@@ -3329,7 +3337,7 @@ def main():
             break
 
     target_str = "short premium ≤ ₹2" if ic.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{PROFIT_TARGET_RS} profit"
-    print(f"Monitoring ({target_str}, SL @ credit)")
+    log.info(f"Monitoring ({target_str}, SL @ credit)")
     try:
         while True:
             monitor_ip_status(kite)
@@ -3344,7 +3352,7 @@ def main():
                 c = load_config()
                 c.pop("position", None)
                 save_config(c)
-                print("Done.")
+                log.info("Done.")
                 return
     except Exception as e:
         telegram_logger.error_alert("IC Strategy", str(e))
