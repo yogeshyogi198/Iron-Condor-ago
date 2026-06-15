@@ -473,6 +473,28 @@ class KiteSession:
             validity="DAY", tag=self.static_id, market_protection=5,
         )
 
+    def get_fill_prices(self, orders_map: dict[str, str]) -> dict[str, float]:
+        """Return {tradingsymbol: average_fill_price} for market orders.
+        orders_map: {tradingsymbol: order_id}. Retries briefly for fills."""
+        import time
+        for _ in range(15):
+            try:
+                all_orders = self.kite.orders()
+                fills = {}
+                for tsym, oid in orders_map.items():
+                    for o in all_orders:
+                        if o["order_id"] == oid and o.get("status") == "COMPLETE":
+                            avg = o.get("average_price")
+                            if avg and float(avg) > 0:
+                                fills[tsym] = float(avg)
+                                break
+                if len(fills) == len(orders_map):
+                    return fills
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return fills
+
 # ---------------------------------------------------------------------------
 # Strike selection by premium
 # ---------------------------------------------------------------------------
@@ -969,17 +991,23 @@ class IronCondorManager:
             return
         log.info(f"EXIT ({reason})")
         exit_spot = self.kite.get_nse_spot()
-        quotes = self.kite.get_quotes([leg.tradingsymbol for leg in self.position.legs])
-        current = 0.0
+        orders_map = {}
         for leg in self.position.legs:
-            prem = get_premium(quotes, leg.tradingsymbol)
-            if prem is not None:
-                current += prem if leg.action == "SELL" else -prem
             reverse = "BUY" if leg.action == "SELL" else "SELL"
             try:
                 oid = self.kite.place_market(leg.tradingsymbol, reverse, LOT_SIZE)
+                orders_map[leg.tradingsymbol] = oid
             except Exception as e:
                 print(f"  ✗ {leg.tradingsymbol}: {e}")
+        fills = self.kite.get_fill_prices(orders_map)
+        current = 0.0
+        for leg in self.position.legs:
+            fill = fills.get(leg.tradingsymbol)
+            if fill is not None and fill > 0:
+                prem = fill
+            else:
+                prem = 0
+            current += prem if leg.action == "SELL" else -prem
         pnl = (self.entry_credit - current) * LOT_SIZE
         charges = calc_charges([asdict(l) for l in self.position.legs], LOT_SIZE)
         append_trade_log({
@@ -1262,17 +1290,23 @@ class CreditSpreadManager:
             return
         log.info(f"EXIT ({reason})")
         exit_spot = self.kite.get_nse_spot()
-        quotes = self.kite.get_quotes([l.tradingsymbol for l in self.position.legs])
-        current = 0.0
+        orders_map = {}
         for leg in self.position.legs:
-            prem = get_premium(quotes, leg.tradingsymbol)
-            if prem is not None:
-                current += prem if leg.action == "SELL" else -prem
             rev = "BUY" if leg.action == "SELL" else "SELL"
             try:
                 oid = self.kite.place_market(leg.tradingsymbol, rev, LOT_SIZE)
+                orders_map[leg.tradingsymbol] = oid
             except Exception as e:
                 print(f"  ✗ {leg.tradingsymbol}: {e}")
+        fills = self.kite.get_fill_prices(orders_map)
+        current = 0.0
+        for leg in self.position.legs:
+            fill = fills.get(leg.tradingsymbol)
+            if fill is not None and fill > 0:
+                prem = fill
+            else:
+                prem = 0
+            current += prem if leg.action == "SELL" else -prem
         pnl = (self.entry_credit - current) * LOT_SIZE
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
@@ -1495,16 +1529,16 @@ class SmaCrossover:
         tsym = trade["tsym"]
         qty = trade["qty"]
         exit_spot = self._get_sensex_spot() or 0
+        oid = None
         try:
-            ltp = self.kite.kite.ltp(f"{SENSEX_EXCHANGE}:{tsym}")
-            exit_prem = ltp.get(f"{SENSEX_EXCHANGE}:{tsym}", {}).get("last_price", 0)
-        except Exception:
-            exit_prem = 0
-        try:
-            self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=SENSEX_EXCHANGE)
+            oid = self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=SENSEX_EXCHANGE)
             print(f"  Closed {tsym}")
         except Exception as e:
             print(f"  Close error: {e}")
+        exit_prem = 0
+        if oid:
+            fills = self.kite.get_fill_prices({tsym: oid})
+            exit_prem = fills.get(tsym, 0)
         entry_prem = trade.get("entry_prem", 0)
         pnl = (entry_prem - exit_prem) * qty if trade["side"] == "CE" else (exit_prem - entry_prem) * qty
         charges = calc_charges([{"action": "BUY", "premium": entry_prem}], qty, exchange=SENSEX_EXCHANGE)
@@ -1925,16 +1959,16 @@ class SmaCrossoverBNF:
         tsym = trade["tsym"]
         qty = trade["qty"]
         exit_spot = self._get_bnf_spot() or 0
+        oid = None
         try:
-            ltp = self.kite.kite.ltp(f"{self.BNF_EXCHANGE}:{tsym}")
-            exit_prem = ltp.get(f"{self.BNF_EXCHANGE}:{tsym}", {}).get("last_price", 0)
-        except Exception:
-            exit_prem = 0
-        try:
-            self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=self.BNF_EXCHANGE)
+            oid = self.kite.place_market(tsym, "BUY" if trade["side"] == "PE" else "SELL", qty, exchange=self.BNF_EXCHANGE)
             print(f"  Closed {tsym}")
         except Exception as e:
             print(f"  Close error: {e}")
+        exit_prem = 0
+        if oid:
+            fills = self.kite.get_fill_prices({tsym: oid})
+            exit_prem = fills.get(tsym, 0)
         entry_prem = trade.get("entry_prem", 0)
         pnl = (entry_prem - exit_prem) * qty if trade["side"] == "CE" else (exit_prem - entry_prem) * qty
         charges = calc_charges([{"action": "BUY", "premium": entry_prem}], qty, exchange=self.BNF_EXCHANGE)
@@ -2583,23 +2617,32 @@ class NiftySMAOptions:
         qty = self.position["qty"]
         print(f"\n{bold(red('EXIT'))} ({reason}) — P&L ₹{pnl:+.2f}")
         exit_spot = self.kite.get_nse_spot() or 0
+        orders_map = {}
+        for leg in legs:
+            reverse = "BUY" if leg["action"] == "SELL" else "SELL"
+            try:
+                oid = self.kite.place_market(leg["tsym"], reverse, qty, exchange=N1H_EXCHANGE)
+                orders_map[leg["tsym"]] = oid
+                print(f"  {red('Close')} {leg['tsym']}")
+            except Exception as e:
+                print(f"  {red('✗')} {leg['tsym']}: {e}")
+        fills = self.kite.get_fill_prices(orders_map)
         current = 0.0
         for leg in legs:
-            prem = self._get_option_premium(leg["tsym"])
+            fill = fills.get(leg["tsym"])
+            if fill is not None and fill > 0:
+                prem = fill
+            else:
+                prem = 0
             if leg["action"] == "SELL":
                 current += leg["premium"] - prem
             else:
                 current += prem - leg["premium"]
-            reverse = "BUY" if leg["action"] == "SELL" else "SELL"
-            try:
-                self.kite.place_market(leg["tsym"], reverse, qty, exchange=N1H_EXCHANGE)
-                print(f"  {red('Close')} {leg['tsym']}")
-            except Exception as e:
-                print(f"  {red('✗')} {leg['tsym']}: {e}")
         charges = calc_charges(
             [{"action": l["action"], "premium": l["premium"]} for l in legs],
             qty, exchange=N1H_EXCHANGE,
         )
+        pnl_actual = round(current * qty, 2)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
             "strategy": f"N1H_{self.position['side']}",
@@ -2611,13 +2654,13 @@ class NiftySMAOptions:
             "entry_credit": round(sum(l["premium"] for l in legs if l["action"] == "SELL") -
                                    sum(l["premium"] for l in legs if l["action"] == "BUY"), 2),
             "exit_value": round(current, 2),
-            "pnl": round(pnl, 2),
+            "pnl": pnl_actual,
             "charges": charges,
             "max_profit_target": 0,
             "stop_loss": round(self.position.get("max_loss", 0), 2),
             "exit_reason": reason,
         })
-        telegram_logger.strategy_exit_alert("N1H OPTIONS", reason, pnl)
+        telegram_logger.strategy_exit_alert("N1H OPTIONS", reason, pnl_actual)
         self.position = None
         print("Done.")
 
@@ -3066,12 +3109,16 @@ class ManualTradeManager:
         exchange = trade["exchange"]
         side = trade["side"]
         reverse = "SELL" if side == "BUY" else "BUY"
+        oid = None
         try:
-            self.kite.place_market(tsym, reverse, qty, exchange=exchange)
+            oid = self.kite.place_market(tsym, reverse, qty, exchange=exchange)
             print(f"  Closed {tsym}")
         except Exception as e:
             print(f"  Close error: {e}")
-        exit_prem = self._get_premium(tsym, exchange)
+        exit_prem = 0
+        if oid:
+            fills = self.kite.get_fill_prices({tsym: oid})
+            exit_prem = fills.get(tsym, 0)
         entry_prem = trade["entry_price"]
         pnl = (exit_prem - entry_prem) * qty if side == "BUY" else (entry_prem - exit_prem) * qty
         charges = calc_charges([{"action": side, "premium": entry_prem}], qty, exchange=exchange)
