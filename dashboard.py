@@ -154,6 +154,7 @@ PAGE = r"""<!DOCTYPE html>
   .btn-danger:disabled { background: #7a1414; opacity: 0.5; cursor: not-allowed; }
   .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
   .btn-secondary:hover { background: #30363d; }
+  .btn-sm { padding: 4px 10px; font-size: 0.85rem; border-radius: 6px; min-width: auto; }
   .top-row { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
   .top-row .stat-box { background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 16px 28px; text-align: center; min-width: 160px; }
   .top-row .stat-box .label { font-size: 0.9rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -313,6 +314,11 @@ PAGE = r"""<!DOCTYPE html>
         <div style="font-size:0.75rem;color:#8b949e;">today</div>
       </div>
       <div class="stat-box" style="min-width:0;padding:12px 16px;">
+        <div class="label">Live P&L (Zerodha)</div>
+        <div class="value" style="font-size:1.3rem;" id="td-live-pnl">₹0</div>
+        <div style="font-size:0.75rem;color:#8b949e;" id="td-live-pos"></div>
+      </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;">
         <div class="label">Est. Charges</div>
         <div class="value red" style="font-size:1.3rem;" id="td-charges">₹0</div>
         <div style="font-size:0.75rem;color:#8b949e;" id="td-charge-legs"></div>
@@ -326,20 +332,30 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 
   <!-- Strategy cards -->
-  <div class="strategy-grid" id="strat-grid">
+   <div class="strategy-grid" id="strat-grid">
     {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio'] %}
     <div class="strat" id="strat-{{ sid }}">
       <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)','ratio':'NIFTYBEES/GOLDBEES Ratio'}[sid] }}</div>
       <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span> <span class="text-xs" id="resume-{{ sid }}" style="color:#d29922;display:none;">&#9888; Position saved</span></div>
       <div class="btn-row">
+        {% if sid == 'mt' %}
+        <button class="btn btn-secondary" id="scan-{{ sid }}" onclick="scanMt()">&#128269; Scan</button>
+        {% else %}
         <button class="btn btn-primary" id="start-{{ sid }}" onclick="action('{{ sid }}','start')">&#9654; Start</button>
+        {% endif %}
         <button class="btn btn-secondary" id="resume-btn-{{ sid }}" onclick="action('{{ sid }}','resume')" style="display:none;">&#8635; Resume</button>
         <button class="btn btn-danger" id="stop-{{ sid }}" onclick="action('{{ sid }}','stop')" disabled>&#9632; Stop</button>
       </div>
       <div class="lots-row" id="lots-{{ sid }}">
+        {% if sid == 'mt' %}
+        {% else %}
         <label style="font-size:0.9rem;color:#8b949e;">Lots:</label>
         <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10" style="width:60px;padding:6px 8px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:1rem;">
+        {% endif %}
       </div>
+      {% if sid == 'mt' %}
+      <div id="mt-positions" style="display:none;margin-top:8px;"></div>
+      {% endif %}
       <div class="mini-log" id="log-{{ sid }}"><div class="hl">Waiting...</div></div>
     </div>
     {% endfor %}
@@ -351,6 +367,51 @@ PAGE = r"""<!DOCTYPE html>
         if (el) el.style.display = 'none';
       }
     });
+
+    var mtPositions = [];
+
+    async function scanMt() {
+      const r = await fetch('/api/mt-scan', {method:'POST'});
+      const d = await r.json();
+      const container = document.getElementById('mt-positions');
+      if (!d.ok) { container.innerHTML = '<div style="color:#f85149;">Error: ' + d.error + '</div>'; container.style.display='block'; return; }
+      if (!d.positions.length) { container.innerHTML = '<div>No positions found.</div>'; container.style.display='block'; return; }
+      mtPositions = d.positions;
+      let html = '<table style="width:100%;font-size:0.85rem;border-collapse:collapse;">';
+      html += '<tr style="color:#8b949e;"><th style="padding:4px;text-align:left;">Side</th><th style="padding:4px;text-align:left;">Symbol</th><th style="padding:4px;text-align:right;">Qty</th><th style="padding:4px;text-align:right;">Avg</th><th style="padding:4px;text-align:right;">LTP</th><th style="padding:4px;text-align:right;">SL price</th><th style="padding:4px;"></th></tr>';
+      for (let i = 0; i < d.positions.length; i++) {
+        const p = d.positions[i];
+        html += '<tr>';
+        html += '<td style="padding:4px;">'+p.side+'</td>';
+        html += '<td style="padding:4px;max-width:140px;overflow:hidden;text-overflow:ellipsis;">'+p.tsym+'</td>';
+        html += '<td style="padding:4px;text-align:right;">'+p.qty+'</td>';
+        html += '<td style="padding:4px;text-align:right;">₹'+p.avg_price.toFixed(2)+'</td>';
+        html += '<td style="padding:4px;text-align:right;">₹'+p.ltp.toFixed(2)+'</td>';
+        html += '<td style="padding:4px;text-align:right;"><input type="number" id="mt-sl-'+i+'" value="" placeholder="SL price" min="0.01" step="0.01" max="99999" style="width:70px;padding:4px;border-radius:4px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;"></td>';
+        html += '<td style="padding:4px;"><button class="btn btn-sm" onclick="setMt('+i+')" id="mt-set-'+i+'">Set</button></td>';
+        html += '</tr>';
+      }
+      html += '</table>';
+      container.innerHTML = html;
+      container.style.display = 'block';
+    }
+
+    async function setMt(i) {
+      const p = mtPositions[i];
+      if (!p) return;
+      const slInput = document.getElementById('mt-sl-'+i);
+      const sl_price = parseFloat(slInput.value);
+      if (!sl_price || sl_price <= 0) { alert('Enter a valid SL price'); return; }
+      const status = await (await fetch('/api/status')).json();
+      const running = status.strategies && status.strategies['mt'];
+      const endpoint = running ? '/api/mt-add' : '/api/mt-start';
+      const r = await fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({trades:[{...p, sl_price}]})});
+      const d = await r.json();
+      if (!d.ok) { alert('Error: ' + d.error); return; }
+      const btn = document.getElementById('mt-set-'+i);
+      if (btn) { btn.textContent = '✓'; btn.disabled = true; btn.style.opacity = '0.6'; }
+      await fetchStatus();
+    }
   </script>
 
   <!-- Settings tabs -->
@@ -409,10 +470,12 @@ document.querySelectorAll('[data-tab]').forEach(btn => {
 
 async function action(strategy, cmd) {
   if (cmd === 'start' || cmd === 'resume') {
-    var lots = 1;
+    var extra = '';
     var inp = document.getElementById('lots-input-' + strategy);
-    if (inp) lots = parseInt(inp.value) || 1;
-    await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy + '&resume=' + (cmd === 'resume' ? '1' : '0') + '&lots=' + lots });
+    if (inp) extra += '&lots=' + (parseInt(inp.value) || 1);
+    var sl_inp = document.getElementById('sl-input-' + strategy);
+    if (sl_inp) extra += '&sl=' + (parseInt(sl_inp.value) || 50);
+    await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy + '&resume=' + (cmd === 'resume' ? '1' : '0') + extra });
   } else {
     await fetch('/api/stop', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy });
   }
@@ -436,7 +499,8 @@ async function fetchStatus() {
       const dot = $('dot-' + s);
       dot.className = 'dot ' + (running ? 'green' : 'red');
       $('s-' + s).textContent = running ? 'RUNNING' : 'STOPPED';
-      $('start-' + s).disabled = running;
+      const startBtn = $('start-' + s);
+      if (startBtn) startBtn.disabled = running;
       $('stop-' + s).disabled = !running;
       const ri = $('resume-' + s);
       const rb = $('resume-btn-' + s);
@@ -447,6 +511,10 @@ async function fetchStatus() {
       } else {
         ri.style.display = 'none';
         rb.style.display = 'none';
+      }
+      if (s === 'mt') {
+        const scanBtn = $('scan-mt');
+        if (scanBtn) scanBtn.style.display = 'inline-block';
       }
     }
     $('s-count').textContent = count + '/9';
@@ -527,6 +595,14 @@ async function fetchTrades() {
     $('td-pnl').className = 'value';
     $('td-pnl').style.fontSize = '1.3rem';
     $('td-pnl').style.color = isGreen ? '#3fb950' : '#f85149';
+    // Live P&L from Zerodha
+    const livePnl = d.live_pnl;
+    if (livePnl !== undefined) {
+      const liveGreen = livePnl >= 0;
+      $('td-live-pnl').textContent = '₹' + livePnl.toLocaleString('en-IN', {minimumFractionDigits:2});
+      $('td-live-pnl').style.color = liveGreen ? '#3fb950' : '#f85149';
+      $('td-live-pos').textContent = (d.live_positions || 0) + ' positions';
+    }
     $('td-charges').textContent = '₹' + d.estimated_charges.toLocaleString('en-IN');
     $('td-charge-legs').textContent = d.charge_legs + ' legs @ ₹50/leg';
     const net = d.closed_pnl - d.estimated_charges;
@@ -650,6 +726,9 @@ def api_start():
             cmd.append("--resume")
         if lots and lots != "1":
             cmd.append(f"--lots={lots}")
+        if strategy == "mt":
+            sl = request.form.get("sl", "50")
+            cmd.append(f"--sl={sl}")
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.Popen(
@@ -690,11 +769,177 @@ def api_stop():
         proc.wait()
     bot_processes[strategy] = None
     cfg = load_config()
-    pos_key = {"ic": "position", "cs": "cs_position", "mt": "manual_trade"}.get(strategy)
+    pos_key = {"ic": "position", "cs": "cs_position", "mt": "manual_trades"}.get(strategy)
     if pos_key and cfg.get(pos_key):
         cfg.pop(pos_key, None)
         save_config(cfg)
     return jsonify({"ok": True, "strategy": strategy})
+
+
+@app.route("/api/mt-scan", methods=["POST"])
+@require_auth
+def api_mt_scan():
+    """Scan Zerodha positions and return list of single-leg option trades."""
+    cfg = load_config()
+    api_key = cfg.get("api_key", "")
+    access_token = cfg.get("access_token", "")
+    if not api_key or not access_token:
+        return jsonify({"ok": False, "error": "Not logged in"}), 400
+    try:
+        kite = KiteConnect(api_key=api_key, access_token=access_token, timeout=15)
+        all_pos = kite.positions()
+        raw_positions = all_pos.get("day", []) + all_pos.get("net", [])
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # Deduplicate by tradingsymbol
+    seen = set()
+    positions = []
+    for p in raw_positions:
+        tsym = p.get("tradingsymbol", "")
+        if tsym not in seen:
+            seen.add(tsym)
+            positions.append(p)
+
+    tracked_tsyms = set()
+    for key in ("position", "cs_position"):
+        saved = cfg.get(key)
+        if saved and "legs" in saved:
+            for leg in saved["legs"]:
+                tracked_tsyms.add(leg.get("tradingsymbol", ""))
+
+    results = []
+    for p in positions:
+        tsym = p.get("tradingsymbol", "")
+        qty = p.get("quantity", 0)
+        if qty == 0 or tsym in tracked_tsyms:
+            continue
+        exchange = p.get("exchange", "")
+        if exchange not in ("NFO", "BFO"):
+            continue
+        otype = "CE" if tsym.endswith("CE") else ("PE" if tsym.endswith("PE") else "")
+        if otype not in ("CE", "PE"):
+            continue
+        try:
+            ltp_data = kite.ltp(f"{exchange}:{tsym}")
+            ltp = ltp_data.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            ltp = 0
+        results.append({
+            "tsym": tsym,
+            "exchange": exchange,
+            "option_type": otype,
+            "side": "BUY" if qty > 0 else "SELL",
+            "qty": abs(qty),
+            "strike": float(p.get("strike_price", 0)),
+            "expiry": (p.get("expiry_date", "") or "")[:10],
+            "avg_price": float(p.get("average_price", 0)),
+            "ltp": ltp,
+        })
+    return jsonify({"ok": True, "positions": results})
+
+
+@app.route("/api/mt-start", methods=["POST"])
+@require_auth
+def api_mt_start():
+    """Save selected manual trades with SLs and start monitoring."""
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid JSON"}), 400
+    trades = data.get("trades", [])
+    if not trades:
+        return jsonify({"ok": False, "error": "No trades selected"}), 400
+    cfg = load_config()
+    trade_list = []
+    for t in trades:
+        avg = float(t.get("avg_price", 0))
+        sl_price = float(t.get("sl_price", 0))
+        if sl_price <= 0:
+            sl_price = avg - 10 if t.get("side") == "BUY" else avg + 10
+        trade_list.append({
+            "tsym": t["tsym"],
+            "strike": float(t.get("strike", 0)),
+            "option_type": t.get("option_type", ""),
+            "side": t.get("side", ""),
+            "qty": int(t.get("qty", 0)),
+            "exchange": t.get("exchange", ""),
+            "expiry": t.get("expiry", ""),
+            "entry_price": avg,
+            "entry_sl": sl_price,
+            "sl": sl_price,
+            "target_level": 1.0,
+            "entry_ts": datetime.now().isoformat(),
+        })
+    cfg["manual_trades"] = trade_list
+    save_config(cfg)
+
+    # Launch bot
+    proc = bot_processes.get("mt")
+    if proc and proc.poll() is None:
+        return jsonify({"ok": False, "error": "Manual Trade already running"}), 400
+    cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), "--strategy=mt", "--resume"]
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.Popen(cmd, cwd=str(BOT_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            encoding="utf-8", errors="replace", bufsize=1, env=env)
+    bot_processes["mt"] = proc
+    with bot_output_locks["mt"]:
+        bot_outputs["mt"] = []
+    t = threading.Thread(target=_reader_thread, args=("mt", proc), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "strategy": "mt"})
+
+
+@app.route("/api/mt-add", methods=["POST"])
+@require_auth
+def api_mt_add():
+    """Add new manual trades to config while bot is running."""
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid JSON"}), 400
+    trades = data.get("trades", [])
+    if not trades:
+        return jsonify({"ok": False, "error": "No trades selected"}), 400
+    cfg = load_config()
+    existing = cfg.get("manual_trades", [])
+    if isinstance(existing, dict):
+        existing = [existing]
+    if not isinstance(existing, list):
+        existing = []
+    existing_tsyms = {t["tsym"] for t in existing if "tsym" in t}
+    for t in trades:
+        avg = float(t.get("avg_price", 0))
+        sl_price = float(t.get("sl_price", 0))
+        if sl_price <= 0:
+            sl_price = avg - 10 if t.get("side") == "BUY" else avg + 10
+        entry = {
+            "tsym": t["tsym"],
+            "strike": float(t.get("strike", 0)),
+            "option_type": t.get("option_type", ""),
+            "side": t.get("side", ""),
+            "qty": int(t.get("qty", 0)),
+            "exchange": t.get("exchange", ""),
+            "expiry": t.get("expiry", ""),
+            "entry_price": avg,
+            "entry_sl": sl_price,
+            "sl": sl_price,
+            "target_level": 1.0,
+            "entry_ts": datetime.now().isoformat(),
+        }
+        if t["tsym"] in existing_tsyms:
+            # Replace existing entry with same tsym
+            for i, e in enumerate(existing):
+                if e.get("tsym") == t["tsym"]:
+                    existing[i] = entry
+                    break
+        else:
+            existing.append(entry)
+            existing_tsyms.add(t["tsym"])
+    cfg["manual_trades"] = existing
+    save_config(cfg)
+    return jsonify({"ok": True, "count": len(trades)})
 
 
 @app.route("/api/status")
@@ -727,9 +972,12 @@ def api_status():
         p = cfg["cs_position"]
         legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
         positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
-    if cfg.get("manual_trade"):
-        p = cfg["manual_trade"]
-        positions["mt"] = {"expiry": p.get("expiry", ""), "entry_credit": p.get("entry_price", 0), "legs": [f"{p['side']} {p['tsym']} SL @ {p.get('sl',0)}"]}
+    if cfg.get("manual_trades"):
+        trades = cfg["manual_trades"]
+        if isinstance(trades, dict):
+            trades = [trades]
+        legs = [f"{t['side']} {t['tsym']} SL @ {t.get('sl',0)}" for t in trades]
+        positions["mt"] = {"expiry": trades[0].get("expiry", "") if trades else "", "entry_credit": 0, "legs": legs}
     return jsonify({
         "strategies": running,
         "heartbeat": heartbeat,
@@ -874,11 +1122,28 @@ def api_trades():
     est_charge_per_leg = 50
     total_charges = closed["legs"] * est_charge_per_leg
 
-    # Running trades from config + dashboard processes
+    # Live P&L from Zerodha positions
+    live_pnl = None
+    live_positions = 0
     cfg = load_config()
+    api_key = cfg.get("api_key", "")
+    access_token = cfg.get("access_token", "")
+    if api_key and access_token:
+        try:
+            k = KiteConnect(api_key=api_key, access_token=access_token, timeout=10)
+            all_pos = k.positions()
+            live_pnl = 0.0
+            for p in all_pos.get("net", []):
+                live_pnl += float(p.get("pnl", 0))
+                if int(p.get("quantity", 0)) != 0 and p.get("tradingsymbol"):
+                    live_positions += 1
+        except Exception:
+            pass
+
+    # Running trades from config + dashboard processes
     running = 0
     running_details = []
-    for key, label in [("position", "IC"), ("cs_position", "CS"), ("manual_trade", "MT")]:
+    for key, label in [("position", "IC"), ("cs_position", "CS"), ("manual_trades", "MT")]:
         if cfg.get(key):
             running += 1
             running_details.append(label)
@@ -898,6 +1163,8 @@ def api_trades():
         "charge_legs": closed["legs"],
         "running_trades": running,
         "running_details": running_details,
+        "live_pnl": round(live_pnl, 2) if live_pnl is not None else None,
+        "live_positions": live_positions,
     })
 
 

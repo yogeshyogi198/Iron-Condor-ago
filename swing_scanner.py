@@ -147,6 +147,8 @@ def main():
     print(f"{'='*50}")
 
     symbols = get_nifty500_symbols()
+    # Filter out non-equity (bonds/G-secs start with digits)
+    symbols = [s for s in symbols if s and not s[0].isdigit()]
     if not symbols:
         print("  Fetching top 700 NSE equities from Kite ...")
         try:
@@ -156,7 +158,7 @@ def main():
                 for r in all_instruments
                 if r.get("instrument_type") in ("", None, "EQ") and r.get("tradingsymbol")
             ])
-            symbols = equities[:500]
+            symbols = [s for s in equities[:500] if not s[0].isdigit()]
             print(f"    Using top {len(symbols)} of {len(equities)} equities")
         except Exception as e:
             print(f"  ERROR fetching NSE instruments: {e}")

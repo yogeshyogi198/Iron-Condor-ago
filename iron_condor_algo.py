@@ -230,8 +230,11 @@ def heartbeat():
     now_str += f"  {ips}" if ips else ""
     if _auth_failed:
         now_str += "  [TOKEN EXPIRED - run --login]"
-    with open(HEARTBEAT_FILE, "w") as f:
-        f.write(now_str)
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(now_str)
+    except PermissionError:
+        pass
 
 def _is_pid_running(pid: int) -> bool:
     try:
@@ -407,7 +410,10 @@ class KiteSession:
             _auth_failed = True
             if reload_token_if_needed(self):
                 return True
-            print("  ✗ Token expired. Run: python iron_condor_algo.py --login")
+            now = time.time()
+            if not hasattr(self, "_last_expired_warn") or now - self._last_expired_warn > 60:
+                print("  ✗ Token expired. Run: python iron_condor_algo.py --login")
+                self._last_expired_warn = now
             return False
 
     def _fetch_instruments(self):
@@ -1447,10 +1453,11 @@ class SmaCrossover:
 
     def _trade_has_position(self, trade: dict) -> bool:
         try:
-            positions = self.kite.kite.positions()["day"]
-            for p in positions:
-                if p.get("tradingsymbol") == trade["tsym"] and p.get("quantity", 0) != 0:
-                    return True
+            all_pos = self.kite.kite.positions()
+            for lst in (all_pos.get("day", []), all_pos.get("net", [])):
+                for p in lst:
+                    if p.get("tradingsymbol") == trade["tsym"] and p.get("quantity", 0) != 0:
+                        return True
         except Exception:
             pass
         return False
@@ -1467,6 +1474,10 @@ class SmaCrossover:
             return
         to_remove = []
         for trade in self.trades:
+            if trade.get("carryover"):
+                if not self._trade_has_position(trade):
+                    to_remove.append(trade)
+                continue
             side = trade["side"]
             entry_price = trade["entry_price"]
             sl = trade["sl"]
@@ -1674,6 +1685,7 @@ class SmaCrossover:
                         "expiry": (p.get("expiry_date", "") or "")[:10],
                         "entry_ts": datetime.now().isoformat(),
                         "entry_prem": 0,
+                        "carryover": True,
                     }
                     self.trades.append(trade)
                     self.trades_today += 1
@@ -1868,10 +1880,11 @@ class SmaCrossoverBNF:
 
     def _trade_has_position(self, trade: dict) -> bool:
         try:
-            positions = self.kite.kite.positions()["day"]
-            for p in positions:
-                if p.get("tradingsymbol") == trade["tsym"] and p.get("quantity", 0) != 0:
-                    return True
+            all_pos = self.kite.kite.positions()
+            for lst in (all_pos.get("day", []), all_pos.get("net", [])):
+                for p in lst:
+                    if p.get("tradingsymbol") == trade["tsym"] and p.get("quantity", 0) != 0:
+                        return True
         except Exception:
             pass
         return False
@@ -1891,6 +1904,10 @@ class SmaCrossoverBNF:
             return
         to_remove = []
         for trade in self.trades:
+            if trade.get("carryover"):
+                if not self._trade_has_position(trade):
+                    to_remove.append(trade)
+                continue
             side = trade["side"]
             entry_price = trade["entry_price"]
             sl = trade["sl"]
@@ -2111,6 +2128,7 @@ class SmaCrossoverBNF:
                         "expiry": (p.get("expiry_date", "") or "")[:10],
                         "entry_ts": datetime.now().isoformat(),
                         "entry_prem": 0,
+                        "carryover": True,
                     }
                     self.trades.append(trade)
                     self.trades_today += 1
@@ -2807,45 +2825,69 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
 # Manual Trade Manager — detect single-leg positions, trail SL
 # ---------------------------------------------------------------------------
 
-MT_CONFIG_KEY = "manual_trade"
+MT_CONFIG_KEY = "manual_trades"
 
 class ManualTradeManager:
     def __init__(self, kite: KiteSession):
         self.kite = kite
-        self.trade: dict | None = None
+        self.trades: list[dict] = []
 
-    def detect_position(self) -> dict | None:
-        """Scan live Zerodha positions for single-leg manual trades."""
+    @staticmethod
+    def _option_type_from_tsym(tsym: str) -> str:
+        if tsym.endswith("CE"):
+            return "CE"
+        if tsym.endswith("PE"):
+            return "PE"
+        return ""
+
+    def detect_positions(self) -> list[dict]:
+        """Scan live Zerodha positions for all single-leg manual trades."""
         try:
-            positions = self.kite.kite.positions()["day"]
+            all_pos = self.kite.kite.positions()
+            positions = all_pos.get("day", []) + all_pos.get("net", [])
         except Exception as e:
             print(f"  Positions fetch error: {e}")
-            return None
+            return []
 
-        # Exclude IC/CS multi-leg positions
-        nifty_option_tsyms = set()
+        if not positions:
+            return []
+
+        # Deduplicate by tradingsymbol (day + net can overlap)
+        seen = set()
+        unique = []
         for p in positions:
             tsym = p.get("tradingsymbol", "")
-            if "NIFTY" in tsym and abs(p.get("quantity", 0)) > 0:
-                nifty_option_tsyms.add(tsym)
+            if tsym not in seen:
+                seen.add(tsym)
+                unique.append(p)
+        positions = unique
 
-        # Find the single leg (not part of any 2-leg or 4-leg strategy)
+        # Exclude positions tracked by IC/CS strategies in config
+        cfg = load_config()
+        tracked_tsyms = set()
+        for key in ("position", "cs_position"):
+            saved = cfg.get(key)
+            if saved and "legs" in saved:
+                for leg in saved["legs"]:
+                    tracked_tsyms.add(leg.get("tradingsymbol", ""))
+
+        results = []
         for p in positions:
             tsym = p.get("tradingsymbol", "")
             qty = p.get("quantity", 0)
-            if qty == 0:
+            if qty == 0 or tsym in tracked_tsyms:
                 continue
             exchange = p.get("exchange", "")
             if exchange not in ("NFO", "BFO"):
                 continue
-            strike = float(p.get("strike_price", 0))
-            otype = p.get("instrument_type", "")
+            otype = self._option_type_from_tsym(tsym)
             if otype not in ("CE", "PE"):
                 continue
+            strike = float(p.get("strike_price", 0))
             lot = abs(qty)
             side = "BUY" if qty > 0 else "SELL"
             expiry = (p.get("expiry_date", "") or "")[:10]
-            return {
+            results.append({
                 "tsym": tsym,
                 "strike": strike,
                 "option_type": otype,
@@ -2854,151 +2896,200 @@ class ManualTradeManager:
                 "exchange": exchange,
                 "expiry": expiry,
                 "entry_qty": qty,
-            }
-        return None
+                "avg_price": float(p.get("average_price", 0)),
+            })
+        return results
 
     def init_from_config(self) -> bool:
-        """Load saved trade + SL from config."""
+        """Load saved trades from config."""
         cfg = load_config()
         saved = cfg.get(MT_CONFIG_KEY)
         if not saved:
             return False
-        self.trade = saved
-        print(f"  Resumed manual trade: {self.trade['tsym']} | SL @ {self.trade['sl']}")
+        self.trades = saved if isinstance(saved, list) else [saved]
+        for t in self.trades:
+            print(f"  Resumed: {t['side']} {t['tsym']} | SL @ {t['sl']}")
         return True
 
     def save_to_config(self):
-        cfg = {**load_config(), MT_CONFIG_KEY: self.trade}
+        cfg = {**load_config(), MT_CONFIG_KEY: self.trades}
         save_config(cfg)
+
+    def check_for_new_trades(self):
+        """Reload config and add any new trades not already tracked."""
+        cfg = load_config()
+        saved = cfg.get(MT_CONFIG_KEY)
+        if not saved:
+            return 0
+        saved_list = saved if isinstance(saved, list) else [saved]
+        existing_tsyms = {t["tsym"] for t in self.trades}
+        added = 0
+        for t in saved_list:
+            if t["tsym"] not in existing_tsyms:
+                self.trades.append(t)
+                log.info(f"  New trade added: {t['side']} {t['tsym']} | SL @ {t['sl']}")
+                added += 1
+            else:
+                # Update existing trade (SL may have changed)
+                for i, et in enumerate(self.trades):
+                    if et["tsym"] == t["tsym"]:
+                        self.trades[i] = t
+                        log.info(f"  Trade updated: {t['side']} {t['tsym']} | SL @ {t['sl']}")
+                        added += 1
+                        break
+        if added:
+            self.save_to_config()
+        return added
 
     def clear_config(self):
         cfg = load_config()
         cfg.pop(MT_CONFIG_KEY, None)
         save_config(cfg)
 
+    def _get_premium(self, tsym: str, exchange: str) -> float:
+        try:
+            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
+            return ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            return 0
+
     def start(self, sl_points: float | None = None):
-        """Start monitoring a detected manual trade. User provides SL in points."""
-        pos = self.detect_position()
-        if not pos:
-            print("  No manual trade detected in Zerodha positions.")
+        """Show detected positions, let user pick which to trade and set SL per trade."""
+        positions = self.detect_positions()
+        if not positions:
+            print("  No manual trades detected in Zerodha positions.")
             return False
 
-        tsym = pos["tsym"]
-        # Get current premium
-        exchange = pos["exchange"]
-        try:
-            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
-            prem = ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
-        except Exception:
-            prem = 0
+        if sl_points is not None:
+            # CLI mode: same SL for all positions
+            selected = positions
+            print(f"  Using SL = {sl_points} pts for all trades")
+        else:
+            # Interactive mode
+            print(f"\n  {'#':>3}  {'Side':>4}  {'Qty':>4}  {'Symbol':<30}  {'Avg':>7}  {'LTP':>7}")
+            print(f"  {'-'*60}")
+            for i, p in enumerate(positions, 1):
+                prem = self._get_premium(p["tsym"], p["exchange"])
+                print(f"  {i:>3}  {p['side']:>4}  {p['qty']:>4}  {p['tsym']:<30}  ₹{p['avg_price']:>5.2f}  ₹{prem:>5.2f}")
+            print()
+            picks = input("  Enter trade numbers to monitor (comma-separated, e.g. 1,3): ").strip()
+            if not picks:
+                print("  No selection. Exiting.")
+                return False
+            indices = []
+            for part in picks.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    idx = int(part) - 1
+                    if 0 <= idx < len(positions):
+                        indices.append(idx)
+            if not indices:
+                print("  Invalid selection. Exiting.")
+                return False
+            selected = [positions[i] for i in indices]
 
-        side = pos["side"]
-        otype = pos["option_type"]
+        self.trades = []
+        for p in selected:
+            prem = self._get_premium(p["tsym"], p["exchange"])
+            entry_price = p.get("avg_price") or prem
+            side = p["side"]
+            is_buy = (side == "BUY")
 
-        if sl_points is None:
-            print(f"\n  Detected: {side} {tsym} x {pos['qty']} @ ₹{prem:.2f}")
-            print("  Enter SL in points (e.g. 50 for ₹50): ", end="")
-            try:
-                sl_points = float(input().strip())
-            except (ValueError, EOFError):
-                print("  Invalid, defaulting to 50 points")
-                sl_points = 50.0
+            if sl_points is None:
+                raw = input(f"  SL pts for {p['tsym']} (entry ₹{entry_price:.2f}): ").strip()
+                try:
+                    sl_pts = float(raw) if raw else 50.0
+                except ValueError:
+                    sl_pts = 50.0
+            else:
+                sl_pts = sl_points
 
-        entry_price = prem
-        is_buy = (side == "BUY")
-        sl_price = entry_price - sl_points if is_buy else entry_price + sl_points
+            sl_price = entry_price - sl_pts if is_buy else entry_price + sl_pts
+            trade = {
+                "tsym": p["tsym"],
+                "strike": p["strike"],
+                "option_type": p["option_type"],
+                "side": side,
+                "qty": p["qty"],
+                "exchange": p["exchange"],
+                "expiry": p["expiry"],
+                "entry_price": entry_price,
+                "entry_sl": sl_price,
+                "sl": sl_price,
+                "target_level": 1.0,
+                "entry_ts": datetime.now().isoformat(),
+            }
+            self.trades.append(trade)
+            print(f"  Monitoring {side} {p['tsym']} x {p['qty']} | Entry ₹{entry_price:.2f} | SL ₹{sl_price:.2f}")
 
-        self.trade = {
-            "tsym": tsym,
-            "strike": pos["strike"],
-            "option_type": otype,
-            "side": side,
-            "qty": pos["qty"],
-            "exchange": exchange,
-            "expiry": pos["expiry"],
-            "entry_price": entry_price,
-            "entry_sl": sl_price,
-            "sl": sl_price,
-            "target_level": 1.0,
-            "entry_ts": datetime.now().isoformat(),
-        }
         self.save_to_config()
-        print(f"  Monitoring {side} {tsym} | Entry ₹{entry_price:.2f} | SL ₹{sl_price:.2f}")
         return True
 
-    def monitor(self):
-        if not self.trade:
+    def monitor(self) -> str:
+        if not self.trades:
             return "NO_TRADE"
-        tsym = self.trade["tsym"]
-        exchange = self.trade["exchange"]
-        try:
-            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
-            current_prem = ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
-        except Exception:
-            current_prem = 0
+        to_remove = []
+        for trade in self.trades:
+            tsym = trade["tsym"]
+            exchange = trade["exchange"]
+            current_prem = self._get_premium(tsym, exchange)
+            entry = trade["entry_price"]
+            sl = trade["sl"]
+            side = trade["side"]
+            is_buy = (side == "BUY")
 
-        entry = self.trade["entry_price"]
-        sl = self.trade["sl"]
-        side = self.trade["side"]
-        is_buy = (side == "BUY")
+            # SL check
+            if (is_buy and current_prem <= sl) or (not is_buy and current_prem >= sl):
+                print(f"  SL hit {tsym} @ ₹{current_prem:.2f}")
+                self._exit(trade)
+                to_remove.append(trade)
+                continue
 
-        # SL check
-        if is_buy and current_prem <= sl:
-            print(f"  SL hit @ ₹{current_prem:.2f}")
-            self.exit("SL_HIT")
-            return "EXIT_SL"
-        elif not is_buy and current_prem >= sl:
-            print(f"  SL hit @ ₹{current_prem:.2f}")
-            self.exit("SL_HIT")
-            return "EXIT_SL"
+            # Trail SL
+            points = abs(current_prem - entry)
+            risk = abs(entry - trade["entry_sl"])
+            target_level = trade["target_level"]
+            rr = points / risk if risk > 0 else 0
 
-        # Trail SL
-        points = abs(current_prem - entry)
-        risk = abs(entry - self.trade["entry_sl"])
-        target_level = self.trade["target_level"]
-        rr = points / risk if risk > 0 else 0
+            if rr >= target_level + 1:
+                if is_buy:
+                    new_sl = entry + (target_level + 1) * risk
+                else:
+                    new_sl = entry - (target_level + 1) * risk
+                if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
+                    trade["sl"] = new_sl
+                    trade["target_level"] = target_level + 1
+                    print(f"  Trail {tsym} SL to ₹{new_sl:.2f} (RR {target_level+1}:1)")
 
-        if rr >= target_level + 1:
-            if is_buy:
-                new_sl = entry + (target_level + 1) * risk
-            else:
-                new_sl = entry - (target_level + 1) * risk
-            if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
-                self.trade["sl"] = new_sl
-                self.trade["target_level"] = target_level + 1
-                self.save_to_config()
-                print(f"  Trail SL to ₹{new_sl:.2f} (RR {target_level+1}:1)")
+        for t in to_remove:
+            self.trades.remove(t)
+
+        self.save_to_config()
+        if not self.trades:
+            self.clear_config()
+            return "ALL_EXIT"
         return "HOLD"
 
-    def exit(self, reason: str):
-        if not self.trade:
-            return
-        tsym = self.trade["tsym"]
-        qty = self.trade["qty"]
-        exchange = self.trade["exchange"]
-        side = self.trade["side"]
-
+    def _exit(self, trade: dict):
+        tsym = trade["tsym"]
+        qty = trade["qty"]
+        exchange = trade["exchange"]
+        side = trade["side"]
         reverse = "SELL" if side == "BUY" else "BUY"
         try:
             self.kite.place_market(tsym, reverse, qty, exchange=exchange)
             print(f"  Closed {tsym}")
         except Exception as e:
             print(f"  Close error: {e}")
-
-        try:
-            ltp = self.kite.kite.ltp(f"{exchange}:{tsym}")
-            exit_prem = ltp.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
-        except Exception:
-            exit_prem = 0
-
-        entry_prem = self.trade["entry_price"]
+        exit_prem = self._get_premium(tsym, exchange)
+        entry_prem = trade["entry_price"]
         pnl = (exit_prem - entry_prem) * qty if side == "BUY" else (entry_prem - exit_prem) * qty
-        charges = calc_charges([{"action": side, "premium": entry_prem}], qty, exchange=self.trade.get("exchange", "NFO"))
+        charges = calc_charges([{"action": side, "premium": entry_prem}], qty, exchange=exchange)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "strategy": f"MT_{self.trade['option_type']}",
-            "expiry": self.trade.get("expiry", ""),
-            "entry_time": self.trade.get("entry_ts", ""),
+            "strategy": f"MT_{trade['option_type']}",
+            "expiry": trade.get("expiry", ""),
+            "entry_time": trade.get("entry_ts", ""),
             "exit_time": datetime.now().isoformat(),
             "entry_spot": round(entry_prem, 2),
             "exit_spot": round(exit_prem, 2),
@@ -3007,11 +3098,9 @@ class ManualTradeManager:
             "pnl": round(pnl, 2),
             "charges": charges,
             "max_profit_target": 0,
-            "stop_loss": round(self.trade.get("entry_sl", 0), 2),
-            "exit_reason": reason,
+            "stop_loss": round(trade.get("entry_sl", 0), 2),
+            "exit_reason": "SL_HIT",
         })
-        self.clear_config()
-        self.trade = None
 
 
 def _run_manual_trade(kite: KiteSession, args):
@@ -3023,11 +3112,12 @@ def _run_manual_trade(kite: KiteSession, args):
     elif manager.init_from_config():
         log.info("  Saved manual trade found. Resuming...")
     else:
-        ok = manager.start()
+        ok = manager.start(sl_points=args.sl)
         if not ok:
             return
 
     log.info("  Monitoring every 60s. Trailing SL active.")
+    check_counter = 0
     try:
         while True:
             monitor_ip_status(kite)
@@ -3036,9 +3126,14 @@ def _run_manual_trade(kite: KiteSession, args):
                 continue
             time.sleep(10)
             action = manager.monitor()
-            if action in ("EXIT_SL",):
-                log.info("Done.")
+            if action in ("ALL_EXIT",):
+                log.info("All trades closed. Done.")
                 return
+            check_counter += 1
+            if check_counter % 5 == 0:
+                n = manager.check_for_new_trades()
+                if n:
+                    log.info(f"  Added {n} new trade(s) from config.")
     except Exception as e:
         telegram_logger.error_alert("Manual Trade", str(e))
         raise
@@ -3127,6 +3222,7 @@ def main():
     parser.add_argument("--strategy", choices=["ic", "sma", "cs", "mt", "bnf", "n1h"], default="ic",
                         help="Strategy: ic (Iron Condor), cs (Credit Spread), sma (SMA Crossover), bnf (Bank Nifty SMA), n1h (Nifty 1H SMA Options)")
     parser.add_argument("--lots", type=int, default=1, help="Lot multiplier (e.g. 2 = 2x lot quantity)")
+    parser.add_argument("--sl", type=float, default=None, help="Manual trade SL in points (e.g. 10 for ₹10)")
     args = parser.parse_args()
     init_trade_log()
 
