@@ -1053,17 +1053,17 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             pcr = pe_oi / ce_oi if ce_oi else 0
             result["pcr"] = round(pcr, 4)
             if pcr > 1.3:
-                result["sentiment"] = "STRONG BEARISH"
-            elif pcr > 1.15:
-                result["sentiment"] = "BEARISH"
-            elif pcr > 1.0:
-                result["sentiment"] = "WEAK BEARISH"
-            elif pcr > 0.85:
-                result["sentiment"] = "WEAK BULLISH"
-            elif pcr > 0.7:
-                result["sentiment"] = "BULLISH"
-            else:
                 result["sentiment"] = "STRONG BULLISH"
+            elif pcr > 1.15:
+                result["sentiment"] = "BULLISH"
+            elif pcr > 1.0:
+                result["sentiment"] = "WEAK BULLISH"
+            elif pcr > 0.85:
+                result["sentiment"] = "WEAK BEARISH"
+            elif pcr > 0.7:
+                result["sentiment"] = "BEARISH"
+            else:
+                result["sentiment"] = "STRONG BEARISH"
         result["time"] = datetime.now().strftime("%H:%M:%S")
     except Exception:
         pass

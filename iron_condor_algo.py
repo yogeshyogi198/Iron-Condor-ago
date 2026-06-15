@@ -126,7 +126,6 @@ def _lock_file_for(strategy: str) -> str:
 
 HEARTBEAT_FILE = os.path.join(os.path.dirname(__file__), ".bot_heartbeat.txt")
 
-_last_known_ipv4 = ""
 _last_known_ipv6 = ""
 _last_ip_check_time: float = 0
 _last_whitelist_ok: Optional[bool] = None
@@ -210,23 +209,14 @@ def get_local_ipv6() -> str:
     return ""
 
 def heartbeat():
-    global _last_known_ipv4, _last_known_ipv6, _auth_failed
+    global _last_known_ipv6, _auth_failed
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ip4 = get_public_ip_v4()
     ip6_local = get_local_ipv6()
-    changed = []
-    if ip4 and ip4 != _last_known_ipv4:
-        if _last_known_ipv4:
-            changed.append(f"IPv4: {_last_known_ipv4} → {ip4}")
-        _last_known_ipv4 = ip4
     if ip6_local and ip6_local != _last_known_ipv6:
         if _last_known_ipv6:
-            changed.append(f"IPv6: {_last_known_ipv6} → {ip6_local}")
+            log.warning(f"IPv6 changed: {_last_known_ipv6} → {ip6_local}")
         _last_known_ipv6 = ip6_local
-    if len(changed) == 2:
-        msg = f"Both IPs changed:\n{changed[0]}\n{changed[1]}\nUpdate Zerodha whitelist."
-        log.warning(msg)
-    ips = "/".join(filter(None, [ip6_local, ip4]))
+    ips = ip6_local or ""
     now_str += f"  {ips}" if ips else ""
     if _auth_failed:
         now_str += "  [TOKEN EXPIRED - run --login]"
@@ -3191,18 +3181,11 @@ def check_ip_whitelist(kite: "KiteSession") -> Optional[bool]:
 
 def monitor_ip_status(kite: "KiteSession"):
     """Periodic IP whitelist check. Prints status changes."""
-    global _last_known_ipv4, _last_known_ipv6
-    v4 = get_public_ip_v4()
+    global _last_known_ipv6
     v6 = get_local_ipv6()
-    changed = []
-    if v4 and v4 != _last_known_ipv4:
-        changed.append(f"IPv4: {_last_known_ipv4 or 'N/A'} → {v4}")
-        _last_known_ipv4 = v4
     if v6 and v6 != _last_known_ipv6:
-        changed.append(f"IPv6: {_last_known_ipv6 or 'N/A'} → {v6}")
+        log.warning(f"IPv6 changed: {_last_known_ipv6 or 'N/A'} → {v6}")
         _last_known_ipv6 = v6
-    if changed:
-        log.warning("IP changed:\n" + "\n".join(changed))
     result = check_ip_whitelist(kite)
     if result is False:
         log.warning("IP is NOT whitelisted. Fix immediately to avoid trade failures.")
