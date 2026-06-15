@@ -250,8 +250,12 @@ def acquire_lock(lock_file: str) -> bool:
     if os.path.exists(lock_file):
         with open(lock_file) as f:
             pid = f.read().strip()
-        if pid and _is_pid_running(int(pid)):
-            print(f"Another instance (PID {pid}) already running. Exiting.")
+        try:
+            pid_int = int(pid) if pid else None
+        except (ValueError, TypeError):
+            pid_int = None
+        if pid_int and _is_pid_running(pid_int):
+            print(f"Another instance (PID {pid_int}) already running. Exiting.")
             return False
         crashed = True
     with open(lock_file, "w") as f:
