@@ -297,6 +297,7 @@ MONTH_ABBR = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 SMA_PERIOD = 60
 SMA_TIMEFRAME = "3minute"
 SENSEX_NSE_SYMBOL = "SENSEX"     # SENSEX index symbol
+SMA_PROXIMITY_PCT = 0.05         # % distance from SMA to trigger pre-trade IP check
 SENSEX_EXCHANGE = "BFO"          # BSE F&O exchange for SENSEX options
 SENSEX_NAME = "SENSEX"           # name column in BFO instrument CSV
 SENSEX_STRIKE_GAP = 100          # SENSEX has 100-point strike intervals
@@ -1370,6 +1371,7 @@ class SmaCrossover:
         self.session1_done = False
         self.session2_done = False
         self.trades = []  # list of trade dicts: {side, entry_ts, entry_price, sl, target_level, qty, tsym, strike, oid, entry_prem, entry_sl, expiry}
+        self._proximity_tested = None  # tracks which side ("CE"/"PE") has been pre-checked
 
     def _get_index_token(self) -> Optional[int]:
         """Find SENSEX index instrument token for historical data."""
@@ -1617,6 +1619,29 @@ class SmaCrossover:
                 continue
 
             log.debug(f"SMA: spot={spot:.0f} price={current_price:.2f} sma={sma:.2f} price_above={price_above} prev_above={prev_above} last_cross={last_cross}")
+
+            # ── Proximity detection: price within 0.05% of SMA(60) ──
+            pct_dist = abs(current_price - sma) / sma * 100
+            near_ce = not price_above and pct_dist < SMA_PROXIMITY_PCT and sma > current_price
+            near_pe = price_above and pct_dist < SMA_PROXIMITY_PCT and current_price > sma
+
+            # Reset proximity flag when price moves well away (2x threshold)
+            if pct_dist > SMA_PROXIMITY_PCT * 2:
+                self._proximity_tested = None
+
+            # Pre-trade IP/API connection test (exactly once per proximity zone)
+            if near_ce and self._proximity_tested != "CE":
+                log.debug(f"PROXIMITY CE: price within {pct_dist:.3f}% of SMA — running pre-trade IP check")
+                periodic_connection_test(self.kite, SENSEX_EXCHANGE)
+                check_ip_whitelist(self.kite)
+                self._proximity_tested = "CE"
+            elif near_pe and self._proximity_tested != "PE":
+                log.debug(f"PROXIMITY PE: price within {pct_dist:.3f}% of SMA — running pre-trade IP check")
+                periodic_connection_test(self.kite, SENSEX_EXCHANGE)
+                check_ip_whitelist(self.kite)
+                self._proximity_tested = "PE"
+
+            # ── Actual crossover execution ──
             if price_above and not prev_above:
                 if last_cross != "CE":
                     log.debug(f"CROSSOVER CE detected — entering trade")
@@ -1806,6 +1831,7 @@ class SmaCrossoverBNF:
     BNF_STRIKE_GAP = 100
     BNF_RAW_TIMEFRAME = "60minute"
     BNF_PERIOD = 60
+    BNF_PROXIMITY_PCT = 0.05
     BNF_DEFAULT_LOT = 15
     BNF_INDEX_SYMBOLS = ["NSE:NIFTY BANK", "NSE:BANKNIFTY"]
 
@@ -1814,6 +1840,7 @@ class SmaCrossoverBNF:
         self.lots = lots
         self.trades_today = 0
         self.trades = []  # list of trade dicts
+        self._proximity_tested = None
 
     def _get_index_token(self) -> Optional[int]:
         """Find BANK NIFTY index instrument token for historical data."""
@@ -2014,80 +2041,6 @@ class SmaCrossoverBNF:
         if trade in self.trades:
             self.trades.remove(trade)
 
-    def _wait_for_crossover(self, timeout_minutes: int = 150) -> bool:
-        """Monitor 2hr resampled SMA crossover (check every new 1hr candle)."""
-        token = self._get_index_token()
-        if not token:
-            print("  Could not find BANK NIFTY index token")
-            return False
-
-        print(f"  Watching 2hr SMA{self.BNF_PERIOD} crossover...")
-        start = datetime.now()
-        last_cross = None
-        last_candle_count = 0
-
-        while True:
-            now = datetime.now()
-            elapsed = (now - start).total_seconds() / 60
-            if elapsed > timeout_minutes:
-                return False
-
-            if not is_market_open():
-                time.sleep(60)
-                continue
-
-            raw = self._get_60min_candles(token)
-            if len(raw) < self.BNF_PERIOD * 2:
-                time.sleep(30)
-                continue
-
-            # Only act when a new 1hr candle has closed
-            if len(raw) == last_candle_count:
-                time.sleep(30)
-                continue
-            last_candle_count = len(raw)
-
-            two_hr = self._resample_2hr(raw)
-            if len(two_hr) < self.BNF_PERIOD:
-                time.sleep(30)
-                continue
-
-            sma = self._calc_sma(two_hr, self.BNF_PERIOD)
-            if sma is None:
-                time.sleep(30)
-                continue
-
-            current_candle = two_hr[-1]
-            prev_candle = two_hr[-2] if len(two_hr) > 1 else current_candle
-            prev_sma = self._calc_sma(two_hr[:-1], self.BNF_PERIOD) if len(two_hr) > self.BNF_PERIOD else sma
-
-            if prev_sma is None:
-                time.sleep(30)
-                continue
-
-            price_above = current_candle["close"] > sma
-            prev_above = prev_candle["close"] > prev_sma
-            spot = self._get_bnf_spot()
-            if spot is None:
-                time.sleep(30)
-                continue
-
-            if price_above and not prev_above:
-                if last_cross != "CE":
-                    opt = self._get_atm_option(spot, is_ce=True)
-                    if opt and self._enter_trade(opt, "CE", current_candle):
-                        return True
-                last_cross = "CE"
-            elif not price_above and prev_above:
-                if last_cross != "PE":
-                    opt = self._get_atm_option(spot, is_ce=False)
-                    if opt and self._enter_trade(opt, "PE", current_candle):
-                        return True
-                last_cross = "PE"
-
-            monitor_ip_status(self.kite)
-            time.sleep(30)
-
     def _enter_trade(self, opt: dict, side: str, entry_candle: dict) -> bool:
         side_str = "BUY"
         entry_price = self._get_bnf_spot()
@@ -2106,6 +2059,7 @@ class SmaCrossoverBNF:
 
         risk = abs(entry_price - sl)
         target_price = entry_price + risk if side == "CE" else entry_price - risk
+        log.debug(f"BNF ENTER: {side} {tsym} x{qty} spot={entry_price:.2f} sl={sl:.2f} risk={risk:.2f} candle_low={entry_candle['low']:.2f} candle_high={entry_candle['high']:.2f}")
 
         entry_prem = 0
         try:
@@ -2117,10 +2071,13 @@ class SmaCrossoverBNF:
         try:
             if is_market_open():
                 oid = self.kite.place_market(tsym, side_str, qty, exchange=self.BNF_EXCHANGE)
+                log.debug(f"BNF ENTER: market {side_str} {tsym} x{qty} oid={oid}")
             else:
                 oid = self.kite.place_limit(tsym, side_str, qty, entry_prem or 100, exchange=self.BNF_EXCHANGE)
+                log.debug(f"BNF ENTER: limit {side_str} {tsym} x{qty} @{entry_prem} oid={oid}")
         except Exception as e:
             print(f"  ✗ {tsym}: {e}")
+            log.debug(f"BNF ENTER FAILED: {tsym} {e}")
             return False
 
         trade = {
@@ -2182,29 +2139,29 @@ class SmaCrossoverBNF:
             pass
 
     def _check_crossover(self, last_candle_count: int):
-        """Non-blocking crossover check. Returns (new_candle_count, side or None)."""
+        """Non-blocking crossover check. Returns (new_candle_count, side or None, candle_or_None)."""
         token = self._get_index_token()
         if not token:
-            return last_candle_count, None
+            return last_candle_count, None, None
 
         raw = self._get_60min_candles(token)
         if len(raw) < self.BNF_PERIOD * 2:
-            return last_candle_count, None
+            return last_candle_count, None, None
 
         if len(raw) == last_candle_count:
-            return last_candle_count, None
+            return last_candle_count, None, None
 
         two_hr = self._resample_2hr(raw)
         if len(two_hr) < self.BNF_PERIOD:
-            return last_candle_count, None
+            return last_candle_count, None, None
 
         sma = self._calc_sma(two_hr, self.BNF_PERIOD)
         if sma is None:
-            return last_candle_count, None
+            return last_candle_count, None, None
 
         prev_sma = self._calc_sma(two_hr[:-1], self.BNF_PERIOD) if len(two_hr) > self.BNF_PERIOD else sma
         if prev_sma is None:
-            return last_candle_count, None
+            return last_candle_count, None, None
 
         current_candle = two_hr[-1]
         prev_candle = two_hr[-2] if len(two_hr) > 1 else current_candle
@@ -2212,13 +2169,34 @@ class SmaCrossoverBNF:
         price_above = current_candle["close"] > sma
         prev_above = prev_candle["close"] > prev_sma
 
+        log.debug(f"BNF SMA: close={current_candle['close']:.2f} sma={sma:.2f} price_above={price_above} prev_above={prev_above} candles={len(raw)}")
+
+        # ── Proximity detection ──
+        pct_dist = abs(current_candle["close"] - sma) / sma * 100
+        near_ce = not price_above and pct_dist < self.BNF_PROXIMITY_PCT
+        near_pe = price_above and pct_dist < self.BNF_PROXIMITY_PCT
+
+        if pct_dist > self.BNF_PROXIMITY_PCT * 2:
+            self._proximity_tested = None
+
+        if near_ce and self._proximity_tested != "CE":
+            log.debug(f"BNF PROXIMITY CE: {pct_dist:.3f}% from SMA — pre-trade IP check")
+            periodic_connection_test(self.kite, self.BNF_EXCHANGE)
+            check_ip_whitelist(self.kite)
+            self._proximity_tested = "CE"
+        elif near_pe and self._proximity_tested != "PE":
+            log.debug(f"BNF PROXIMITY PE: {pct_dist:.3f}% from SMA — pre-trade IP check")
+            periodic_connection_test(self.kite, self.BNF_EXCHANGE)
+            check_ip_whitelist(self.kite)
+            self._proximity_tested = "PE"
+
         side = None
         if price_above and not prev_above:
             side = "CE"
         elif not price_above and prev_above:
             side = "PE"
 
-        return len(raw), side
+        return len(raw), side, current_candle
 
     def run(self):
         """Main SMA crossover loop — multiple concurrent trades."""
@@ -2233,22 +2211,21 @@ class SmaCrossoverBNF:
             monitor_ip_status(self.kite)
             periodic_connection_test(self.kite, self.BNF_EXCHANGE)
             now = datetime.now()
+            log.debug(f"BNF LOOP: time={now.strftime('%H:%M:%S')} trades_today={self.trades_today} last_cross={last_cross}")
 
             active_count = sum(1 for t in self.trades if self._trade_has_position(t))
 
             # Single crossover check per loop (non-blocking)
             if active_count < 2 and self._in_session(now):
-                cross_signal, side = self._check_crossover(last_candle_count)
-                if isinstance(cross_signal, int):
-                    last_candle_count = cross_signal
-                if side:
+                new_count, side, candle = self._check_crossover(last_candle_count)
+                if isinstance(new_count, int):
+                    last_candle_count = new_count
+                if side and side != last_cross:
                     spot = self._get_bnf_spot()
                     if spot:
                         opt = self._get_atm_option(spot, is_ce=(side == "CE"))
-                        if opt:
-                            candle = {"low": spot - 50, "high": spot + 50}  # fallback
-                            if self._enter_trade(opt, side, candle):
-                                last_cross = side
+                        if opt and self._enter_trade(opt, side, candle):
+                            last_cross = side
 
             # Manage all active trades
             if self.trades:
@@ -2277,6 +2254,7 @@ N1H_NAME = "NIFTY"
 N1H_SPOT_SYMBOL = "NSE:NIFTY 50"
 N1H_TIMEFRAME = "60minute"
 N1H_PERIOD = 60
+N1H_PROXIMITY_PCT = 0.05
 N1H_STRIKE_GAP = 50
 N1H_LOT_DEFAULT = 25
 
@@ -2299,6 +2277,7 @@ class NiftySMAOptions:
         self.entry_time: str = ""
         self.entry_spot: float = 0
         self._order_ids: dict[str, str] = {}
+        self._proximity_tested = None
 
     # ── helpers ──────────────────────────────────────────────
 
@@ -2371,6 +2350,27 @@ class NiftySMAOptions:
         pc = candles[-2]["close"]
         above = cc > sma
         prev_above = pc > prev_sma
+        log.debug(f"N1H SMA: close={cc:.2f} prev_close={pc:.2f} sma={sma:.2f} above={above} prev_above={prev_above} candles={len(candles)}")
+
+        # ── Proximity detection ──
+        pct_dist = abs(cc - sma) / sma * 100
+        near_ce = not above and pct_dist < N1H_PROXIMITY_PCT
+        near_pe = above and pct_dist < N1H_PROXIMITY_PCT
+
+        if pct_dist > N1H_PROXIMITY_PCT * 2:
+            self._proximity_tested = None
+
+        if near_ce and self._proximity_tested != "CE":
+            log.debug(f"N1H PROXIMITY CE: {pct_dist:.3f}% from SMA — pre-trade IP check")
+            periodic_connection_test(self.kite, N1H_EXCHANGE)
+            check_ip_whitelist(self.kite)
+            self._proximity_tested = "CE"
+        elif near_pe and self._proximity_tested != "PE":
+            log.debug(f"N1H PROXIMITY PE: {pct_dist:.3f}% from SMA — pre-trade IP check")
+            periodic_connection_test(self.kite, N1H_EXCHANGE)
+            check_ip_whitelist(self.kite)
+            self._proximity_tested = "PE"
+
         if above and not prev_above:
             return "CE"  # bullish
         if not above and prev_above:
@@ -2556,6 +2556,7 @@ class NiftySMAOptions:
             monitor_ip_status(self.kite)
             periodic_connection_test(self.kite, N1H_EXCHANGE)
             now = datetime.now()
+            log.debug(f"N1H LOOP: time={now.strftime('%H:%M:%S')} has_position={self.position is not None}")
 
             # ── ENTRY PHASE ──
             if self.position is None:
@@ -2576,6 +2577,7 @@ class NiftySMAOptions:
                 side = self._side_from_crossover()
                 if side:
                     print(f"  {bold(cyan('Crossover detected'))}: {side}")
+                    log.debug(f"N1H CROSSOVER: {side} — entering 4-leg structure")
                     self.entry_spot = self.kite.get_nse_spot() or 0
                     self.entry_time = now.isoformat()
                     expiry = nearest_expiry_today(self.kite.get_option_instruments())
