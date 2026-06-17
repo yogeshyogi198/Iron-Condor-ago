@@ -1545,9 +1545,11 @@ def api_trades():
         except Exception:
             pass
 
-    # Live P&L from Zerodha positions
+    # Live P&L + realized P&L from Zerodha positions
     live_pnl = None
     live_positions = 0
+    realized_pnl = None  # Actual realized P&L from Zerodha day positions
+    realized_charges = 0.0
     running_charges = 0.0
     actual_open_tsyms: set[str] = set()
     cfg = load_config()
@@ -1566,6 +1568,31 @@ def api_trades():
             for p in all_pos.get("day", []):
                 if int(p.get("quantity", 0)) != 0 and p.get("tradingsymbol"):
                     actual_open_tsyms.add(p["tradingsymbol"])
+            # Compute realized P&L from fully closed day positions
+            zerodha_realized = 0.0
+            zerodha_closed_count = 0
+            for p in all_pos.get("day", []):
+                if int(p.get("quantity", 0)) == 0:
+                    pnl = float(p.get("pnl", 0))
+                    if abs(pnl) > 0.01:
+                        zerodha_realized += pnl
+                        zerodha_closed_count += 1
+            if abs(zerodha_realized) > 0.01:
+                realized_pnl = zerodha_realized
+                # Estimate charges from actual fill amounts
+                for p in all_pos.get("day", []):
+                    if int(p.get("quantity", 0)) == 0:
+                        buy_amt = float(p.get("buy_amount", 0))
+                        sell_amt = float(p.get("sell_amount", 0))
+                        buy_qty = int(p.get("buy_quantity", 0))
+                        sell_qty = int(p.get("sell_quantity", 0))
+                        if buy_qty > 0 and sell_qty > 0:
+                            avg_buy = buy_amt / buy_qty if buy_amt else 0
+                            avg_sell = sell_amt / sell_qty if sell_amt else 0
+                            side = "BUY" if buy_qty > sell_qty else "SELL"
+                            premium = avg_buy if side == "BUY" else avg_sell
+                            qty = abs(buy_qty - sell_qty)
+                            realized_charges += calc_charges([{"action": side, "premium": premium}], qty)
 
             # Estimated charges for running positions: use current LTP
             day_positions = all_pos.get("net", [])
@@ -1631,14 +1658,24 @@ def api_trades():
                 running += 1
                 running_details.append(short)
 
-    total_charges = round(closed["charges"] + running_charges, 2)
+    # Use Zerodha realized P&L as primary (more accurate), fallback to trade_log.csv
+    if realized_pnl is not None:
+        display_pnl = round(realized_pnl, 2)
+        display_charges = round(realized_charges, 2)
+        display_closed = zerodha_closed_count  # # closed trades = positions no longer open
+    else:
+        display_pnl = round(closed["pnl"], 2)
+        display_charges = round(closed["charges"], 2)
+        display_closed = closed["total"]
+
+    total_charges = round(display_charges + running_charges, 2)
 
     return jsonify({
         "date": today,
-        "closed_trades": closed["total"],
-        "closed_pnl": round(closed["pnl"], 2),
+        "closed_trades": display_closed,
+        "closed_pnl": display_pnl,
         "by_strategy": closed["by_strategy"],
-        "actual_charges_closed": round(closed["charges"], 2),
+        "actual_charges_closed": display_charges,
         "est_charges_running": round(running_charges, 2),
         "total_charges": total_charges,
         "running_trades": running,
