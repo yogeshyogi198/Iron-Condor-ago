@@ -28,8 +28,6 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
 
-BOT_SCRIPT = Path(__file__).parent / "iron_condor_algo.py"
-
 load_dotenv()
 
 _DASH_API_CALLS: list[float] = []
@@ -46,7 +44,7 @@ CONFIG_FILE = BOT_DIR / "kite_config.json"
 HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
 TRADE_LOG = BOT_DIR / "trade_log.csv"
 
-STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sc", "sw", "sr", "ratio"]
+STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sw", "sr", "ratio", "sc_nifty", "sc_bnf", "sc_sensex"]
 LOT_SIZE = 65  # NIFTY lot size for charges estimation
 
 app = Flask(__name__)
@@ -57,24 +55,83 @@ PASSWORD_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard Login</title>
+<title>Dashboard · Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 40px; width: 440px; }
-  h1 { color: #58a6ff; font-size: 1.8rem; margin-bottom: 24px; text-align: center; }
-  input { width: 100%; padding: 16px 20px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-size: 1.2rem; margin-bottom: 18px; }
-  .btn { width: 100%; padding: 16px; border: none; border-radius: 10px; font-size: 1.2rem; font-weight: 600; cursor: pointer; background: #238636; color: #fff; }
-  .btn:hover { background: #2ea043; }
-  .error { color: #f85149; text-align: center; margin-top: 12px; font-size: 1rem; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:'Inter',-apple-system,'Segoe UI',sans-serif;
+    min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:#080c14; color:#e2e8f0;
+    position:relative; overflow:hidden;
+  }
+  body::before {
+    content:''; position:fixed; inset:0; z-index:0;
+    background:
+      radial-gradient(circle at 20% 30%, rgba(91,141,239,0.12), transparent 60%),
+      radial-gradient(circle at 80% 70%, rgba(22,192,152,0.09), transparent 60%);
+  }
+  .card {
+    position:relative; z-index:1;
+    background:rgba(16,20,30,0.8); backdrop-filter:blur(24px);
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:24px; padding:48px 40px;
+    width:420px; max-width:92vw;
+    box-shadow:0 24px 80px rgba(0,0,0,0.6);
+    transition:transform .3s ease;
+  }
+  .logo {
+    width:56px; height:56px; border-radius:16px;
+    background:linear-gradient(135deg,#5B8DEF,#16C098);
+    display:flex; align-items:center; justify-content:center;
+    margin:0 auto 20px; font-size:28px;
+    box-shadow:0 8px 28px rgba(91,141,239,0.25);
+  }
+  h1 {
+    font-family:'Sora',sans-serif; font-weight:700;
+    font-size:1.6rem; text-align:center;
+    background:linear-gradient(135deg,#e2e8f0,#94a3b8);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+    background-clip:text; margin-bottom:6px;
+  }
+  .sub { text-align:center; color:#64748b; font-size:0.9rem; margin-bottom:28px; }
+  input {
+    width:100%; padding:16px 20px; border-radius:14px;
+    border:1px solid rgba(255,255,255,0.08);
+    background:rgba(0,0,0,0.35); color:#e2e8f0;
+    font-size:1rem; font-family:'Inter',sans-serif;
+    margin-bottom:16px; transition:border-color .25s ease, box-shadow .25s ease;
+    outline:none;
+  }
+  input:focus { border-color:#5B8DEF; box-shadow:0 0 0 3px rgba(91,141,239,0.15); }
+  input::placeholder { color:#475569; }
+  .btn {
+    width:100%; padding:16px; border:none; border-radius:14px;
+    font-size:1rem; font-weight:600; font-family:'Inter',sans-serif;
+    cursor:pointer;
+    background:linear-gradient(135deg,#5B8DEF,#16C098);
+    color:#fff; transition:transform .2s ease, box-shadow .2s ease;
+    box-shadow:0 4px 16px rgba(91,141,239,0.25);
+  }
+  .btn:hover { transform:translateY(-1px); box-shadow:0 6px 24px rgba(91,141,239,0.35); }
+  .btn:active { transform:translateY(0); }
+  .error {
+    text-align:center; margin-top:16px; font-size:0.9rem;
+    color:#f87171; background:rgba(248,113,113,0.1);
+    padding:10px 16px; border-radius:10px;
+  }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>&#128274; Dashboard Login</h1>
+  <div class="logo">&#9889;</div>
+  <h1>Trading Bot</h1>
+  <div class="sub">Enter your password to continue</div>
   <form method="POST" action="/login">
-    <input type="password" name="password" placeholder="Enter password" autofocus>
-    <button type="submit" class="btn">Unlock</button>
+    <input type="password" name="password" placeholder="Password" autofocus>
+    <button type="submit" class="btn">Unlock Dashboard</button>
   </form>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
 </div>
@@ -97,9 +154,6 @@ def require_auth(f):
 bot_processes: dict[str, subprocess.Popen | None] = {s: None for s in STRATEGIES}
 bot_outputs: dict[str, list[str]] = {s: [] for s in STRATEGIES}
 bot_output_locks: dict[str, threading.Lock] = {s: threading.Lock() for s in STRATEGIES}
-sc_processes: dict[str, subprocess.Popen | None] = {}  # symbol -> process for sc
-sc_outputs: dict[str, list[str]] = {}
-sc_output_locks: dict[str, threading.Lock] = {}
 
 
 def load_config() -> dict:
@@ -123,19 +177,6 @@ def _reader_thread(strategy: str, proc: subprocess.Popen):
         pass
 
 
-def _sc_reader_thread(symbol: str, proc: subprocess.Popen):
-    try:
-        for line in iter(proc.stdout.readline, ""):
-            lock = sc_output_locks.setdefault(symbol, threading.Lock())
-            with lock:
-                buf = sc_outputs.setdefault(symbol, [])
-                buf.append(line.rstrip())
-                if len(buf) > 200:
-                    sc_outputs[symbol] = buf[-200:]
-    except Exception:
-        pass
-
-
 STRATEGY_LABELS = {
     "ic": "Iron Condor (NIFTY)",
     "cs": "Credit Spread (NIFTY)",
@@ -145,8 +186,10 @@ STRATEGY_LABELS = {
     "sr": "Swing Rebalancer (Daily)",
     "bnf": "Bank Nifty 2H SMA(60)",
     "n1h": "Nifty 1H SMA Options",
-    "sc": "3-Min Scalper (NIFTY)",
     "ratio": "NIFTYBEES/GOLDBEES Ratio",
+    "sc_nifty": "3-Min Scalper (NIFTY)",
+    "sc_bnf": "3-Min Scalper (BANKNIFTY)",
+    "sc_sensex": "3-Min Scalper (SENSEX)",
 }
 
 PAGE = r"""<!DOCTYPE html>
@@ -154,119 +197,404 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Trading Bot Dashboard</title>
+<title>Trading Bot · Dashboard</title>
+<script>(function(){try{var t=localStorage.getItem('dashTheme')||'terminal';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','terminal');}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 30px; font-size: 28px; }
-  .container { max-width: 100%; margin: 0 auto; }
-  h1 { color: #58a6ff; font-size: 3rem; margin-bottom: 28px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-  h1 small { font-size: 1.3rem; color: #8b949e; font-weight: 400; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 30px; margin-bottom: 28px; }
-  .strategy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
-  .strat { background: #0d1117; border: 1px solid #30363d; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-  .strat .name { font-size: 1.8rem; font-weight: 700; color: #58a6ff; }
-  .strat .status { font-size: 1.4rem; }
-  .strat .status .dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; margin-right: 8px; }
-  .strat .status .dot.green { background: #3fb950; }
-  .strat .status .dot.red { background: #f85149; }
-  .strat .status .dot.gray { background: #484f58; }
-  .strat .btn-row { display: flex; gap: 12px; }
-  .strat .btn-row .btn { flex: 1; }
-  .strat .mini-log { background: #0d1117; border: 1px solid #21262d; border-radius: 10px; padding: 14px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 1.2rem; max-height: 300px; overflow-y: auto; line-height: 1.6; color: #8b949e; }
-  .strat .mini-log .hl { color: #c9d1d9; }
-  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 16px 32px; border: none; border-radius: 12px; font-size: 1.4rem; font-weight: 600; cursor: pointer; }
-  .btn-primary { background: #238636; color: #fff; }
-  .btn-primary:hover { background: #2ea043; }
-  .btn-primary:disabled { background: #1b5e2a; opacity: 0.5; cursor: not-allowed; }
-  .btn-danger { background: #b71c1c; color: #fff; }
-  .btn-danger:hover { background: #d32f2f; }
-  .btn-danger:disabled { background: #7a1414; opacity: 0.5; cursor: not-allowed; }
-  .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
-  .btn-secondary:hover { background: #30363d; }
-  .btn-sm { padding: 4px 10px; font-size: 0.85rem; border-radius: 6px; min-width: auto; }
-  .top-row { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
-  .top-row .stat-box { background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 16px 28px; text-align: center; min-width: 160px; }
-  .top-row .stat-box .label { font-size: 0.9rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-  .top-row .stat-box .value { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
-  .top-row .stat-box .value.green { color: #3fb950; }
-  .top-row .stat-box .value.red { color: #f85149; }
-  .top-row .stat-box .value.blue { color: #58a6ff; }
-  .tab { display: none; }
-  .tab.active { display: block; }
-  .tab-bar { display: flex; gap: 6px; margin-bottom: 18px; }
-  .tab-bar button { padding: 14px 28px; border: 1px solid #30363d; background: #0d1117; color: #8b949e; border-radius: 10px 10px 0 0; cursor: pointer; font-size: 1.1rem; font-weight: 600; }
-  .tab-bar button.active { background: #161b22; color: #c9d1d9; border-bottom: 2px solid #58a6ff; }
-  input { padding: 14px 20px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-size: 1.1rem; }
-  input[type="text"], input[type="password"] { width: 100%; }
-  .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-  .col { display: flex; flex-direction: column; gap: 16px; }
-  .flex-1 { flex: 1; }
-  .mt-8 { margin-top: 8px; }
-  .mb-8 { margin-bottom: 8px; }
-  .msg { padding: 18px 22px; border-radius: 10px; margin: 12px 0; font-size: 1.1rem; line-height: 1.6; }
-  .msg-success { background: #1b7e3a22; border: 1px solid #1b7e3a; color: #7ee787; }
-  .msg-error { background: #b71c1c22; border: 1px solid #b71c1c; color: #f85149; }
-  .msg-info { background: #1f6feb22; border: 1px solid #1f6feb; color: #58a6ff; }
-  a { color: #58a6ff; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .text-xs { font-size: 0.95rem; color: #8b949e; }
-  /* ── Tablet ── */
-  @media (max-width: 1024px) {
-    body { padding: 18px; font-size: 22px; }
-    .strategy-grid { grid-template-columns: repeat(2, 1fr); gap: 18px; }
-    .top-row .stat-box { min-width: 120px; padding: 12px 20px; }
-    .top-row .stat-box .value { font-size: 1.5rem; }
-    .card { padding: 22px; }
-    .tab-bar button { padding: 12px 20px; font-size: 1.1rem; }
-    h1 { font-size: 2.2rem; }
-    .strat .name { font-size: 1.5rem; }
-    .btn { padding: 14px 24px; font-size: 1.2rem; }
-    .strat .mini-log { font-size: 1rem; }
+  :root, html[data-theme="terminal"] {
+    --bg:#080c17;
+    --mesh1: radial-gradient(circle at 15% 10%, rgba(91,141,239,0.18), transparent 60%);
+    --mesh2: radial-gradient(circle at 85% 90%, rgba(22,192,152,0.12), transparent 60%);
+    --card-bg: rgba(16,20,30,0.72);
+    --card-border: rgba(255,255,255,0.06);
+    --log-bg: rgba(0,0,0,0.40);
+    --border: rgba(255,255,255,0.08);
+    --text:#E8EDF5; --text-dim:#8892A8;
+    --accent:#5B8DEF; --accent-2:#16C098; --accent-rgb:91,141,239;
+    --green:#16C098; --green-rgb:22,192,152;
+    --red:#FF5C72; --red-rgb:255,92,114;
+    --amber:#F5A623; --amber-rgb:245,166,35;
+    --deep-red:#E0344C;
+    --shadow:0 12px 40px rgba(0,0,0,0.55);
+    --radius:18px;
   }
-  /* ── Mobile ── */
-  @media (max-width: 768px) {
-    body { padding: 12px; font-size: 18px; }
-    .container { padding: 0; }
-    h1 { font-size: 1.8rem; margin-bottom: 16px; gap: 8px; }
-    h1 small { font-size: 0.9rem; }
-    .card { padding: 14px; margin-bottom: 14px; border-radius: 12px; }
-    .strategy-grid { grid-template-columns: 1fr; gap: 14px; }
-    .strat { padding: 16px; gap: 12px; }
-    .strat .name { font-size: 1.3rem; }
-    .strat .status { font-size: 1rem; }
-    .strat .status .dot { width: 12px; height: 12px; }
-    .strat .btn-row { gap: 8px; flex-wrap: wrap; }
-    .strat .btn-row .btn { flex: 1; min-width: 80px; padding: 12px 14px; font-size: 1rem; }
-    .strat .mini-log { font-size: 0.8rem; max-height: 150px; padding: 10px; }
-    .top-row { gap: 8px; margin-bottom: 12px; }
-    .top-row .stat-box { min-width: 80px; padding: 8px 10px; border-radius: 8px; flex: 1; }
-    .top-row .stat-box .label { font-size: 0.75rem; }
-    .top-row .stat-box .value { font-size: 1.2rem; margin-top: 4px; }
-    .tab-bar { gap: 4px; overflow-x: auto; }
-    .tab-bar button { padding: 8px 14px; font-size: 0.85rem; white-space: nowrap; }
-    .btn { padding: 10px 16px; font-size: 0.9rem; border-radius: 8px; }
-    input { padding: 10px 14px; font-size: 0.9rem; }
-    .msg { padding: 12px 14px; font-size: 0.9rem; }
-    .text-xs { font-size: 0.8rem; }
-    .lots-row input { width: 50px !important; font-size: 0.85rem !important; }
+  html[data-theme="dusk"] {
+    --bg:#1a110e;
+    --mesh1: radial-gradient(circle at 15% 10%, rgba(255,138,101,0.20), transparent 60%);
+    --mesh2: radial-gradient(circle at 85% 90%, rgba(245,193,116,0.14), transparent 60%);
+    --card-bg: rgba(38,28,22,0.70);
+    --card-border: rgba(255,219,189,0.08);
+    --log-bg: rgba(0,0,0,0.35);
+    --border: rgba(255,219,189,0.10);
+    --text:#F2E6DA; --text-dim:#B09A86;
+    --accent:#FF8A65; --accent-2:#F5C174; --accent-rgb:255,138,101;
+    --green:#4CC9A0; --green-rgb:76,201,160;
+    --red:#FF6F61; --red-rgb:255,111,97;
+    --amber:#F5C174; --amber-rgb:245,193,116;
+    --deep-red:#E2574C;
+    --shadow:0 12px 40px rgba(0,0,0,0.50);
+    --radius:20px;
   }
-  /* ── Market data & summary grid responsive ── */
-  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-  .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
-  @media (max-width: 1024px) {
-    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-    .grid-5 { grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  html[data-theme="daylight"] {
+    --bg:#F7F4EE;
+    --mesh1: radial-gradient(circle at 15% 10%, rgba(47,111,237,0.10), transparent 60%);
+    --mesh2: radial-gradient(circle at 85% 90%, rgba(15,163,125,0.08), transparent 60%);
+    --card-bg: rgba(255,255,255,0.78);
+    --card-border: rgba(31,36,45,0.06);
+    --log-bg: rgba(31,36,45,0.04);
+    --border: rgba(31,36,45,0.08);
+    --text:#1E2330; --text-dim:#6B7280;
+    --accent:#2F6FED; --accent-2:#0FA37D; --accent-rgb:47,111,237;
+    --green:#0FA37D; --green-rgb:15,163,125;
+    --red:#E0344C; --red-rgb:224,52,78;
+    --amber:#B97A1A; --amber-rgb:185,122,26;
+    --deep-red:#C22B3E;
+    --shadow:0 12px 36px rgba(31,36,45,0.10);
+    --radius:18px;
   }
-  @media (max-width: 768px) {
-    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-    .grid-5 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { font-size:16px; }
+
+  body {
+    font-family:'Inter',-apple-system,'Segoe UI',sans-serif;
+    background-color:var(--bg); color:var(--text);
+    padding:32px; min-height:100vh; position:relative;
+    transition:background-color .4s ease, color .4s ease;
+  }
+  body::before { content:''; position:fixed; inset:0; z-index:-1; background:var(--mesh1),var(--mesh2); }
+
+  .container { max-width:1440px; margin:0 auto; }
+
+  /* ── HERO ── */
+  .hero {
+    display:flex; justify-content:space-between; align-items:center;
+    gap:20px; flex-wrap:wrap; margin-bottom:28px; animation:fadeDown .5s ease;
+  }
+  @keyframes fadeDown { 0%{opacity:0;transform:translateY(-12px)} 100%{opacity:1;transform:translateY(0)} }
+  .hero-brand { display:flex; align-items:center; gap:16px; }
+  .hero-icon {
+    width:48px; height:48px; border-radius:14px;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    display:flex; align-items:center; justify-content:center;
+    font-size:24px; color:#fff;
+    box-shadow:0 6px 20px rgba(var(--accent-rgb),0.30);
+    flex-shrink:0;
+  }
+  .hero-title h1 {
+    font-family:'Sora',sans-serif; font-weight:700; font-size:1.75rem;
+    letter-spacing:-0.025em;
+    background:linear-gradient(135deg,var(--text),var(--text-dim));
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+    background-clip:text;
+  }
+  .hero-sub {
+    font-size:0.75rem; color:var(--text-dim); text-transform:uppercase;
+    letter-spacing:0.1em; margin-top:1px;
+  }
+  .hero-actions { display:flex; align-items:center; gap:12px; }
+  .hero-clock { font-size:0.85rem; color:var(--text-dim); font-variant-numeric:tabular-nums; }
+
+  .theme-switch {
+    display:flex; gap:6px; padding:5px;
+    border-radius:999px; background:var(--log-bg);
+    border:1px solid var(--card-border); backdrop-filter:blur(12px);
+  }
+  .swatch {
+    width:28px; height:28px; border-radius:50%;
+    border:2px solid transparent; cursor:pointer; padding:0;
+    transition:transform .2s ease, border-color .2s ease;
+  }
+  .swatch:hover { transform:scale(1.12); }
+  .swatch.active { border-color:var(--text); transform:scale(1.15); }
+  .swatch-terminal { background:linear-gradient(135deg,#080c17,#5B8DEF); }
+  .swatch-dusk { background:linear-gradient(135deg,#2b1c16,#FF8A65); }
+  .swatch-daylight { background:linear-gradient(135deg,#F7F4EE,#2F6FED); }
+
+  /* ── MESSAGES ── */
+  .msg {
+    padding:14px 20px; border-radius:12px; margin:12px 0;
+    font-size:0.9rem; line-height:1.5; animation:fadeDown .35s ease;
+  }
+  .msg-success { background:rgba(var(--green-rgb),0.10); border:1px solid rgba(var(--green-rgb),0.30); color:var(--green); }
+  .msg-error { background:rgba(var(--red-rgb),0.10); border:1px solid rgba(var(--red-rgb),0.30); color:var(--red); }
+  .msg-info { background:rgba(var(--accent-rgb),0.10); border:1px solid rgba(var(--accent-rgb),0.30); color:var(--accent); }
+
+  /* ── CARDS ── */
+  .card {
+    background:var(--card-bg); backdrop-filter:blur(20px);
+    border:1px solid var(--card-border);
+    border-radius:var(--radius); padding:24px;
+    margin-bottom:22px; box-shadow:var(--shadow);
+    transition:background-color .4s ease, box-shadow .3s ease;
+  }
+  .card-header {
+    display:flex; justify-content:space-between; align-items:center;
+    margin-bottom:16px; flex-wrap:wrap; gap:8px;
+  }
+  .card-title {
+    font-family:'Sora',sans-serif; font-weight:700; font-size:1.1rem;
+    display:flex; align-items:center; gap:10px;
+  }
+  .card-title .badge {
+    font-size:0.65rem; font-weight:600; text-transform:uppercase;
+    letter-spacing:0.06em; padding:3px 10px; border-radius:999px;
+    font-family:'Inter',sans-serif;
+    background:rgba(var(--accent-rgb),0.12); color:var(--accent);
+    border:1px solid rgba(var(--accent-rgb),0.20);
+  }
+
+  /* ── TOP STATUS BAR ── */
+  .status-row { display:flex; gap:12px; flex-wrap:wrap; }
+  .stat-pill {
+    display:flex; align-items:center; gap:8px;
+    background:var(--log-bg); border:1px solid var(--card-border);
+    border-radius:999px; padding:8px 18px;
+    font-size:0.85rem; flex:1; min-width:130px; justify-content:center;
+    transition:background .3s ease;
+  }
+  .stat-pill .sp-label { color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.06em; font-weight:600; }
+  .stat-pill .sp-value { font-weight:700; font-variant-numeric:tabular-nums; color:var(--text); }
+  .stat-pill .sp-value.green { color:var(--green); }
+  .stat-pill .sp-value.red { color:var(--red); }
+  .stat-pill .sp-value.blue { color:var(--accent); }
+  .stat-pill .sp-mini { font-size:0.75rem; color:var(--text-dim); margin-left:4px; }
+
+  /* ── MARKET DATA ── */
+  .mkt-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  .mkt-card {
+    background:var(--log-bg); border:1px solid var(--card-border);
+    border-radius:14px; padding:16px;
+    position:relative; overflow:hidden;
+    transition:transform .2s ease, border-color .2s ease;
+  }
+  .mkt-card:hover { transform:translateY(-2px); border-color:var(--border); }
+  .mkt-label { font-size:0.65rem; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim); margin-bottom:4px; }
+  .mkt-spot { font-family:'Sora',sans-serif; font-size:1.4rem; font-weight:700; }
+  .mkt-spot.green { color:var(--green); } .mkt-spot.red { color:var(--red); } .mkt-spot.blue { color:var(--accent); }
+  .mkt-chg { font-size:0.95rem; font-weight:600; margin-top:2px; }
+  .mkt-ohl { font-size:0.75rem; color:var(--text-dim); margin-top:6px; line-height:1.5; }
+  .mkt-range { font-size:0.75rem; color:var(--amber); margin-top:2px; font-weight:500; }
+  .mkt-pcr-big { font-family:'Sora',sans-serif; font-size:1.8rem; font-weight:800; }
+  .mkt-sentiment { font-size:1rem; font-weight:700; margin-top:2px; }
+  .mkt-oi { font-size:0.75rem; color:var(--text-dim); margin-top:6px; }
+
+  /* ── TODAY'S SUMMARY ── */
+  .sum-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; }
+  .sum-item {
+    background:var(--log-bg); border:1px solid var(--card-border);
+    border-radius:12px; padding:14px 12px; text-align:center;
+    transition:transform .2s ease;
+  }
+  .sum-item:hover { transform:translateY(-2px); }
+  .sum-label { font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-dim); }
+  .sum-value { font-family:'Sora',sans-serif; font-size:1.15rem; font-weight:700; margin-top:4px; }
+  .sum-sub { font-size:0.65rem; color:var(--text-dim); margin-top:3px; }
+  .sum-value.green { color:var(--green); } .sum-value.red { color:var(--red); } .sum-value.blue { color:var(--accent); }
+
+  /* ── STRATEGY CARDS ── */
+  .strat-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(310px,1fr)); gap:18px; }
+  .strat {
+    background:var(--card-bg); backdrop-filter:blur(20px);
+    border:1px solid var(--card-border);
+    border-radius:var(--radius); padding:20px;
+    display:flex; flex-direction:column; gap:12px;
+    box-shadow:var(--shadow);
+    position:relative; overflow:hidden;
+    transition:border-color .3s ease, box-shadow .3s ease, transform .2s ease;
+  }
+  .strat:hover { transform:translateY(-3px); }
+  .strat.is-running {
+    border-color:rgba(var(--green-rgb),0.25);
+    box-shadow:0 0 32px -8px rgba(var(--green-rgb),0.25), var(--shadow);
+  }
+  .strat::before {
+    content:''; position:absolute; top:0; left:0; bottom:0; width:4px;
+    border-radius:4px 0 0 4px;
+    background:var(--border); transition:background .4s ease, box-shadow .4s ease;
+  }
+  .strat.is-running::before { background:var(--green); box-shadow:0 0 16px rgba(var(--green-rgb),0.5); }
+  .strat-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+  .strat-meta { display:flex; flex-direction:column; gap:1px; }
+  .strat-icon {
+    width:40px; height:40px; border-radius:12px;
+    display:flex; align-items:center; justify-content:center; font-size:18px;
+    background:var(--log-bg); border:1px solid var(--card-border);
+    flex-shrink:0;
+  }
+  .strat-name { font-family:'Sora',sans-serif; font-size:1.05rem; font-weight:700; }
+  .strat-eyebrow { font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim); }
+  .strat .status-row { display:flex; align-items:center; gap:10px; }
+  .status-badge {
+    display:inline-flex; align-items:center; gap:6px;
+    padding:3px 12px; border-radius:999px;
+    font-size:0.72rem; font-weight:600; text-transform:uppercase;
+    letter-spacing:0.04em;
+    background:rgba(var(--red-rgb),0.10); color:var(--red);
+    border:1px solid rgba(var(--red-rgb),0.15);
+  }
+  .status-badge.running { background:rgba(var(--green-rgb),0.10); color:var(--green); border-color:rgba(var(--green-rgb),0.20); }
+  .status-badge .pulse-dot {
+    width:6px; height:6px; border-radius:50%; background:currentColor;
+    animation:pulseDot 2s ease-in-out infinite;
+  }
+  @keyframes pulseDot { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .resume-tag {
+    font-size:0.7rem; color:var(--amber);
+    padding:2px 8px; border-radius:6px;
+    background:rgba(var(--amber-rgb),0.10);
+    border:1px solid rgba(var(--amber-rgb),0.15);
+  }
+  .strat .actions { display:flex; gap:8px; }
+  .strat .actions .btn { flex:1; }
+  .lots-row { display:flex; align-items:center; gap:8px; }
+  .lots-row label { font-size:0.82rem; color:var(--text-dim); }
+  .lots-row input {
+    width:60px; padding:6px 8px; border-radius:8px;
+    border:1px solid var(--card-border); background:var(--log-bg);
+    color:var(--text); font-size:0.9rem; text-align:center; font-weight:600;
+  }
+  .lots-row input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+
+  .mini-log {
+    background:var(--log-bg); border:1px solid var(--card-border);
+    border-radius:10px; padding:12px 14px;
+    font-family:'JetBrains Mono','Cascadia Code','Fira Code',monospace;
+    font-size:0.75rem; max-height:200px; overflow-y:auto;
+    line-height:1.6; color:var(--text-dim);
+  }
+  .mini-log .hl { color:var(--text); }
+
+  /* ── BUTTONS ── */
+  .btn {
+    display:inline-flex; align-items:center; justify-content:center;
+    gap:6px; padding:11px 18px; border:none; border-radius:10px;
+    font-family:'Inter',sans-serif; font-size:0.88rem; font-weight:600;
+    cursor:pointer; transition:transform .15s ease, filter .15s ease, opacity .15s ease, box-shadow .15s ease;
+  }
+  .btn:hover:not(:disabled) { transform:translateY(-1px); filter:brightness(1.08); }
+  .btn:active:not(:disabled) { transform:translateY(0); }
+  .btn-primary { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#fff; box-shadow:0 4px 14px rgba(var(--accent-rgb),0.25); }
+  .btn-primary:disabled { opacity:.30; cursor:not-allowed; box-shadow:none; }
+  .btn-danger { background:linear-gradient(135deg,var(--red),var(--deep-red)); color:#fff; box-shadow:0 4px 14px rgba(var(--red-rgb),0.20); }
+  .btn-danger:disabled { opacity:.30; cursor:not-allowed; box-shadow:none; }
+  .btn-secondary { background:transparent; color:var(--text); border:1px solid var(--border); }
+  .btn-secondary:hover { background:rgba(var(--accent-rgb),0.08); border-color:var(--accent); }
+  .btn-sm { padding:4px 10px; font-size:0.72rem; border-radius:6px; min-width:auto; }
+
+  /* ── TABS ── */
+  .tab { display:none; }
+  .tab.active { display:block; animation:fadeDown .3s ease; }
+  .tab-bar { display:flex; gap:4px; margin-bottom:18px; background:var(--log-bg); border-radius:12px; padding:4px; }
+  .tab-bar button {
+    padding:10px 22px; border:none; background:transparent;
+    color:var(--text-dim); border-radius:10px;
+    cursor:pointer; font-size:0.88rem; font-weight:600;
+    transition:background .2s ease, color .2s ease;
+  }
+  .tab-bar button.active { background:var(--card-bg); color:var(--text); box-shadow:0 2px 8px rgba(0,0,0,0.12); }
+  .tab-bar button:hover:not(.active) { background:rgba(var(--accent-rgb),0.06); }
+
+  /* ── FORMS ── */
+  input {
+    padding:12px 16px; border-radius:10px;
+    border:1px solid var(--card-border); background:var(--log-bg);
+    color:var(--text); font-size:0.9rem; font-family:'Inter',sans-serif;
+    transition:border-color .25s ease, box-shadow .25s ease;
+    outline:none;
+  }
+  input[type="text"], input[type="password"], input[type="number"] { width:100%; }
+  input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(var(--accent-rgb),0.10); }
+  input::placeholder { color:var(--text-dim); opacity:.6; }
+
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .col { display:flex; flex-direction:column; gap:12px; }
+  .flex-1 { flex:1; }
+  .mt-8 { margin-top:8px; }
+  .mb-8 { margin-bottom:8px; }
+
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .text-xs { font-size:0.82rem; color:var(--text-dim); }
+
+  /* ── MT TABLE ── */
+  .mt-table { width:100%; font-size:0.8rem; border-collapse:collapse; }
+  .mt-table th { padding:6px 8px; text-align:left; color:var(--text-dim); font-weight:600; font-size:0.65rem; text-transform:uppercase; letter-spacing:0.06em; border-bottom:1px solid var(--card-border); }
+  .mt-table td { padding:6px 8px; border-bottom:1px solid var(--card-border); }
+  .mt-table input { padding:4px 6px; width:70px; font-size:0.8rem; border-radius:6px; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width:1200px) {
+    .mkt-grid { grid-template-columns:repeat(2,1fr); }
+    .sum-grid { grid-template-columns:repeat(4,1fr); }
+  }
+  @media (max-width:1024px) {
+    body { padding:20px; }
+    .card { padding:20px; }
+    .hero-title h1 { font-size:1.45rem; }
+    .strat-grid { gap:14px; }
+    .stat-pill { padding:6px 14px; font-size:0.8rem; min-width:100px; }
+  }
+  @media (max-width:768px) {
+    body { padding:12px; }
+    .hero { margin-bottom:18px; }
+    .hero-icon { width:40px; height:40px; font-size:20px; border-radius:10px; }
+    .hero-title h1 { font-size:1.2rem; }
+    .hero-sub { font-size:0.65rem; }
+    .hero-clock { display:none; }
+    .card { padding:14px; margin-bottom:14px; border-radius:14px; }
+    .card-header { margin-bottom:10px; }
+    .mkt-grid { grid-template-columns:1fr 1fr; gap:8px; }
+    .mkt-card { padding:12px; }
+    .mkt-spot { font-size:1.15rem; }
+    .mkt-pcr-big { font-size:1.4rem; }
+    .sum-grid { grid-template-columns:repeat(2,1fr); gap:8px; }
+    .sum-item { padding:10px; }
+    .sum-value { font-size:1rem; }
+    .strat-grid { grid-template-columns:1fr; gap:12px; }
+    .strat { padding:16px; border-radius:14px; }
+    .strat .actions { gap:6px; flex-wrap:wrap; }
+    .strat .actions .btn { flex:1; min-width:72px; padding:10px 12px; font-size:0.82rem; }
+    .mini-log { font-size:0.7rem; max-height:140px; padding:10px; }
+    .status-row { gap:8px; }
+    .stat-pill { min-width:auto; flex:1; padding:6px 10px; font-size:0.75rem; }
+    .stat-pill .sp-mini { display:none; }
+    .tab-bar { gap:2px; }
+    .tab-bar button { padding:8px 14px; font-size:0.8rem; }
+    .btn { padding:10px 14px; font-size:0.82rem; }
+    input { padding:10px 14px; font-size:0.85rem; }
+  }
+
+  @media (prefers-reduced-motion:reduce) {
+    *,*::before,*::after { animation-duration:0s!important; transition-duration:0s!important; }
+    .strat:hover, .btn:hover { transform:none!important; }
   }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>&#9889; Trading Bot <small>multi-strategy</small></h1>
+  <!-- HERO -->
+  <div class="hero">
+    <div class="hero-brand">
+      <div class="hero-icon">&#9889;</div>
+      <div class="hero-title">
+        <h1>Dashboard</h1>
+        <div class="hero-sub">Multi-strategy execution console</div>
+      </div>
+    </div>
+    <div class="hero-actions">
+      <span class="hero-clock" id="live-clock"></span>
+      <div class="theme-switch" id="theme-switch">
+        <button class="swatch swatch-terminal" data-theme-option="terminal" title="Terminal"></button>
+        <button class="swatch swatch-dusk" data-theme-option="dusk" title="Dusk"></button>
+        <button class="swatch swatch-daylight" data-theme-option="daylight" title="Daylight"></button>
+      </div>
+    </div>
+  </div>
 
+  <!-- Flash messages -->
   {% set msgs = request.args.get('msg','').split('|') if request.args.get('msg') else [] %}
   {% for m in msgs %}
     {% if m %}
@@ -274,113 +602,111 @@ PAGE = r"""<!DOCTYPE html>
     {% endif %}
   {% endfor %}
 
-  <!-- Top status bar -->
+  <!-- TOP STATUS BAR -->
+  <div class="card" style="padding:16px 20px;">
+    <div class="status-row">
+      <div class="stat-pill"><span class="sp-label">Heartbeat</span><span class="sp-value" id="s-heartbeat">---</span></div>
+      <div class="stat-pill"><span class="sp-label">Token</span><span class="sp-value" id="s-token">---</span></div>
+      <div class="stat-pill"><span class="sp-label">Strategies</span><span class="sp-value blue" id="s-count">0/10</span><span class="sp-mini" id="s-running-list"></span></div>
+    </div>
+  </div>
+
+  <!-- MARKET DATA -->
   <div class="card">
-    <div class="top-row">
-      <div class="stat-box"><div class="label">Heartbeat</div><div class="value" id="s-heartbeat">---</div></div>
-      <div class="stat-box"><div class="label">Token</div><div class="value" id="s-token">---</div></div>
-      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/10</div><div style="font-size:1rem;color:#8b949e;margin-top:4px;" id="s-running-list"></div></div>
-      <div class="stat-box" style="border-color:#b71c1c;">
-        <div class="label" style="color:#f85149;">Kill Switch</div>
-        <button class="btn btn-danger" id="btn-kill" onclick="killSwitch()" style="font-size:1.2rem;padding:8px 18px;margin-top:6px;">&#9762; KILL ALL</button>
+    <div class="card-header">
+      <div class="card-title">&#128200; Market Data <span class="badge" id="market-time">---</span></div>
+    </div>
+    <div class="mkt-grid">
+      <div class="mkt-card">
+        <div class="mkt-label">NIFTY 50</div>
+        <div class="mkt-spot blue" id="m-nifty-spot">---</div>
+        <div class="mkt-chg" id="m-nifty-chg"></div>
+        <div class="mkt-ohl">O: <span id="m-nifty-open"></span> &middot; H: <span id="m-nifty-high"></span> &middot; L: <span id="m-nifty-low"></span></div>
+        <div class="mkt-range">&#8646; Range: <span id="m-nifty-range"></span></div>
+      </div>
+      <div class="mkt-card">
+        <div class="mkt-label">SENSEX</div>
+        <div class="mkt-spot blue" id="m-sensex-spot">---</div>
+        <div class="mkt-chg" id="m-sensex-chg"></div>
+        <div class="mkt-ohl">O: <span id="m-sensex-open"></span> &middot; H: <span id="m-sensex-high"></span> &middot; L: <span id="m-sensex-low"></span></div>
+        <div class="mkt-range">&#8646; Range: <span id="m-sensex-range"></span></div>
+      </div>
+      <div class="mkt-card">
+        <div class="mkt-label">BANK NIFTY</div>
+        <div class="mkt-spot blue" id="m-banknifty-spot">---</div>
+        <div class="mkt-chg" id="m-banknifty-chg"></div>
+        <div class="mkt-ohl">O: <span id="m-banknifty-open"></span> &middot; H: <span id="m-banknifty-high"></span> &middot; L: <span id="m-banknifty-low"></span></div>
+        <div class="mkt-range">&#8646; Range: <span id="m-banknifty-range"></span></div>
+      </div>
+      <div class="mkt-card">
+        <div class="mkt-label">SENTIMENT (PCR)</div>
+        <div class="mkt-pcr-big" id="m-pcr">---</div>
+        <div class="mkt-sentiment" id="m-sentiment"></div>
+        <div class="mkt-oi">CE OI: <span id="m-ce-oi"></span> &middot; PE OI: <span id="m-pe-oi"></span></div>
       </div>
     </div>
   </div>
 
-  <!-- Market Data card -->
+  <!-- TODAY'S SUMMARY -->
   <div class="card">
-    <div class="top-row" style="margin-bottom:12px;">
-      <div style="font-size:1.2rem;font-weight:700;color:#58a6ff;">Market Data</div>
-      <div style="font-size:0.85rem;color:#8b949e;" id="market-time"></div>
+    <div class="card-header">
+      <div class="card-title">&#128202; Today's Summary <span class="badge" id="trade-date"></span></div>
     </div>
-    <div class="grid-4">
-      <div class="stat-box" style="min-width:0;">
-        <div class="label">NIFTY</div>
-        <div class="value blue" style="font-size:1.5rem;" id="m-nifty-spot">---</div>
-        <div style="font-size:1.2rem;margin-top:6px;"><span id="m-nifty-chg"></span></div>
-        <div style="font-size:1.1rem;color:#8b949e;margin-top:4px;">O: <span id="m-nifty-open"></span> H: <span id="m-nifty-high"></span> L: <span id="m-nifty-low"></span></div>
-        <div style="font-size:1.1rem;color:#d29922;margin-top:4px;">Range: <span id="m-nifty-range"></span></div>
+    <div class="sum-grid">
+      <div class="sum-item">
+        <div class="sum-label">Running</div>
+        <div class="sum-value blue" id="td-running">0</div>
+        <div class="sum-sub" id="td-running-list"></div>
       </div>
-      <div class="stat-box" style="min-width:0;">
-        <div class="label">SENSEX</div>
-        <div class="value blue" style="font-size:1.5rem;" id="m-sensex-spot">---</div>
-        <div style="font-size:1.2rem;margin-top:6px;"><span id="m-sensex-chg"></span></div>
-        <div style="font-size:1.1rem;color:#8b949e;margin-top:4px;">O: <span id="m-sensex-open"></span> H: <span id="m-sensex-high"></span> L: <span id="m-sensex-low"></span></div>
-        <div style="font-size:1.1rem;color:#d29922;margin-top:4px;">Range: <span id="m-sensex-range"></span></div>
+      <div class="sum-item">
+        <div class="sum-label">Closed</div>
+        <div class="sum-value blue" id="td-closed">0</div>
+        <div class="sum-sub" id="td-closed-list"></div>
       </div>
-      <div class="stat-box" style="min-width:0;">
-        <div class="label">BANK NIFTY</div>
-        <div class="value blue" style="font-size:1.5rem;" id="m-banknifty-spot">---</div>
-        <div style="font-size:1.2rem;margin-top:6px;"><span id="m-banknifty-chg"></span></div>
-        <div style="font-size:1.1rem;color:#8b949e;margin-top:4px;">O: <span id="m-banknifty-open"></span> H: <span id="m-banknifty-high"></span> L: <span id="m-banknifty-low"></span></div>
-        <div style="font-size:1.1rem;color:#d29922;margin-top:4px;">Range: <span id="m-banknifty-range"></span></div>
+      <div class="sum-item">
+        <div class="sum-label">P&amp;L (Closed)</div>
+        <div class="sum-value" id="td-pnl">&#8377;0</div>
+        <div class="sum-sub">today</div>
       </div>
-      <div class="stat-box" style="min-width:0;">
-        <div class="label">SENTIMENT (PCR)</div>
-        <div class="value" style="font-size:2.2rem;font-weight:800;" id="m-pcr">---</div>
-        <div style="font-size:1.3rem;font-weight:700;margin-top:6px;" id="m-sentiment"></div>
-        <div style="font-size:1rem;color:#8b949e;margin-top:6px;">CE OI: <span id="m-ce-oi"></span> | PE OI: <span id="m-pe-oi"></span></div>
+      <div class="sum-item">
+        <div class="sum-label">Live P&amp;L</div>
+        <div class="sum-value" id="td-live-pnl">&#8377;0</div>
+        <div class="sum-sub" id="td-live-pos"></div>
+      </div>
+      <div class="sum-item">
+        <div class="sum-label">Est. Charges</div>
+        <div class="sum-value red" id="td-chg-running">&#8377;0</div>
+        <div class="sum-sub">open @ LTP</div>
+      </div>
+      <div class="sum-item">
+        <div class="sum-label">Actual Charges</div>
+        <div class="sum-value red" id="td-chg-closed">&#8377;0</div>
+        <div class="sum-sub">fill price</div>
+      </div>
+      <div class="sum-item">
+        <div class="sum-label">Net P&amp;L</div>
+        <div class="sum-value" id="td-net">&#8377;0</div>
+        <div class="sum-sub">after charges</div>
       </div>
     </div>
   </div>
 
-  <!-- Today's Summary card -->
-  <div class="card">
-    <div class="top-row" style="margin-bottom:8px;">
-      <div style="font-size:1.1rem;font-weight:700;color:#58a6ff;">Today's Summary</div>
-      <div style="font-size:0.85rem;color:#8b949e;" id="trade-date"></div>
-    </div>
-    <div class="grid-5">
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Running</div>
-        <div class="value blue" style="font-size:1.3rem;" id="td-running">0</div>
-        <div style="font-size:0.75rem;color:#8b949e;" id="td-running-list"></div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Closed</div>
-        <div class="value blue" style="font-size:1.3rem;" id="td-closed">0</div>
-        <div style="font-size:0.75rem;color:#8b949e;" id="td-closed-list"></div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">P&L (closed)</div>
-        <div class="value" style="font-size:1.3rem;" id="td-pnl">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;">today</div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Live P&L (Zerodha)</div>
-        <div class="value" style="font-size:1.3rem;" id="td-live-pnl">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;" id="td-live-pos"></div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Est. Charges (Running)</div>
-        <div class="value red" style="font-size:1.3rem;" id="td-chg-running">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;">open positions @ LTP</div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Actual Charges (Closed)</div>
-        <div class="value red" style="font-size:1.3rem;" id="td-chg-closed">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;">trade log @ fill price</div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;">
-        <div class="label">Net P&L</div>
-        <div class="value" style="font-size:1.3rem;" id="td-net">₹0</div>
-        <div style="font-size:0.75rem;color:#8b949e;">after total charges</div>
-      </div>
-      <div class="stat-box" style="min-width:0;padding:12px 16px;border-color:#f85149;">
-        <div class="label">MTM Limit</div>
-        <div class="value" style="font-size:1.3rem;" id="td-mtm">--</div>
-        <div style="font-size:0.75rem;color:#8b949e;">max daily loss guard</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Strategy cards -->
-   <div class="strategy-grid" id="strat-grid">
-     {% for sid in ['ic','cs','sma','mt','bnf','n1h','sc','sw','sr','ratio'] %}
+  <!-- STRATEGY CARDS -->
+  <div class="strat-grid" id="strat-grid">
+    {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio'] %}
     <div class="strat" id="strat-{{ sid }}">
-      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sc':'3-Min Scalper (NIFTY)','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)','ratio':'NIFTYBEES/GOLDBEES Ratio'}[sid] }}</div>
-      <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span> <span class="text-xs" id="resume-{{ sid }}" style="color:#d29922;display:none;">&#9888; Position saved</span></div>
-      <div class="btn-row">
+      <div class="strat-head">
+        <div class="strat-meta">
+          <div class="strat-name">{{ {'ic':'Iron Condor','cs':'Credit Spread','sma':'SMA Crossover','mt':'Manual Trade','bnf':'Bank Nifty 2H SMA','n1h':'Nifty 1H SMA','sw':'Swing Scanner','sr':'Swing Rebalancer','ratio':'NiftyBees/GoldBees'}[sid] }}</div>
+          <div class="strat-eyebrow">{{ {'ic':'NIFTY OPTIONS','cs':'NIFTY OPTIONS','sma':'SENSEX INDEX','mt':'MANUAL &middot; TRAIL SL','bnf':'BANK NIFTY','n1h':'NIFTY OPTIONS','sw':'WEEKLY SCAN','sr':'DAILY REBALANCE','ratio':'PAIR TRADE'}[sid] }}</div>
+        </div>
+        <div class="strat-icon">{{ {'ic':'&#9670;','cs':'&#9632;','sma':'&#8593;','mt':'&#9998;','bnf':'&#9632;','n1h':'&#9670;','sw':'&#128269;','sr':'&#128260;','ratio':'&#9881;'}[sid]|safe }}</div>
+      </div>
+      <div class="status-row">
+        <span class="status-badge" id="sb-{{ sid }}"><span class="pulse-dot" id="dot-{{ sid }}" style="display:none;"></span><span id="s-{{ sid }}">STOPPED</span></span>
+        <span class="resume-tag" id="resume-{{ sid }}" style="display:none;">&#9888; Saved</span>
+      </div>
+      <div class="actions">
         {% if sid == 'mt' %}
         <button class="btn btn-secondary" id="scan-{{ sid }}" onclick="scanMt()">&#128269; Scan</button>
         {% else %}
@@ -391,93 +717,56 @@ PAGE = r"""<!DOCTYPE html>
       </div>
       <div class="lots-row" id="lots-{{ sid }}">
         {% if sid == 'mt' %}
-        {% elif sid == 'sc' %}
-        <label style="font-size:0.9rem;color:#8b949e;margin-right:8px;">Symbols:</label>
-        <label style="font-size:0.9rem;color:#c9d1d9;"><input type="checkbox" id="sc-sym-NIFTY" checked> NIFTY</label>
-        <label style="font-size:0.9rem;color:#c9d1d9;margin-left:8px;"><input type="checkbox" id="sc-sym-BANKNIFTY"> BANKNIFTY</label>
-        <label style="font-size:0.9rem;color:#c9d1d9;margin-left:8px;"><input type="checkbox" id="sc-sym-SENSEX"> SENSEX</label>
-        <span style="margin-left:12px;font-size:0.9rem;color:#8b949e;">Lots:</span>
-        <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10" style="width:50px;padding:4px 6px;border-radius:4px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:0.9rem;">
         {% else %}
-        <label style="font-size:0.9rem;color:#8b949e;">Lots:</label>
-        <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10" style="width:60px;padding:6px 8px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:1rem;">
+        <label>Lots:</label>
+        <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10">
         {% endif %}
       </div>
       {% if sid == 'mt' %}
-      <div id="mt-positions" style="display:none;margin-top:8px;"></div>
+      <div id="mt-positions" style="display:none;"></div>
       {% endif %}
-      <div class="mini-log" id="log-{{ sid }}"><div class="hl">Waiting...</div></div>
-      {% if sid == 'sc' %}
-      <div id="sc-sub-logs" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;">
-        <div class="mini-log" id="log-sc-NIFTY" style="display:none;font-size:0.9rem;max-height:180px;"><div class="hl">NIFTY: idle</div></div>
-        <div class="mini-log" id="log-sc-BANKNIFTY" style="display:none;font-size:0.9rem;max-height:180px;"><div class="hl">BANKNIFTY: idle</div></div>
-        <div class="mini-log" id="log-sc-SENSEX" style="display:none;font-size:0.9rem;max-height:180px;"><div class="hl">SENSEX: idle</div></div>
-      </div>
-      {% endif %}
+      <div class="mini-log" id="log-{{ sid }}"><div class="hl">Waiting for output...</div></div>
     </div>
     {% endfor %}
+
+    <!-- Scalper composite card — 3 indices in one -->
+    <div class="strat" id="strat-sc">
+      <div class="strat-head">
+        <div class="strat-meta">
+          <div class="strat-name">3-Min Scalper</div>
+          <div class="strat-eyebrow">ADX + SUPERTREND</div>
+        </div>
+        <div class="strat-icon">&#9889;</div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:10px;">
+      {% for sc_sid in ['sc_nifty','sc_bnf','sc_sensex'] %}
+      {% set sc_label = {'sc_nifty':'NIFTY','sc_bnf':'BANKNIFTY','sc_sensex':'SENSEX'}[sc_sid] %}
+      {% set sc_icon = {'sc_nifty':'&#9670;','sc_bnf':'&#9632;','sc_sensex':'&#9670;'}[sc_sid] %}
+      <div style="flex:1;background:var(--log-bg);border:1px solid var(--card-border);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:1rem;">{{ sc_icon|safe }}</span>
+          <span style="font-weight:700;font-size:0.85rem;">{{ sc_label }}</span>
+          <span class="status-badge" id="sb-{{ sc_sid }}"><span class="pulse-dot" id="dot-{{ sc_sid }}" style="display:none;"></span><span id="s-{{ sc_sid }}">STOPPED</span></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <label style="font-size:0.75rem;color:var(--text-dim);">Lots:</label>
+          <input type="number" id="lots-input-{{ sc_sid }}" value="1" min="1" max="10" style="width:46px;padding:3px 5px;border-radius:6px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);font-size:0.8rem;text-align:center;font-weight:600;">
+          <button class="btn btn-primary" id="start-{{ sc_sid }}" onclick="action('{{ sc_sid }}','start')">&#9654; Start</button>
+          <button class="btn btn-danger" id="stop-{{ sc_sid }}" onclick="action('{{ sc_sid }}','stop')" disabled>&#9632; Stop</button>
+        </div>
+        <div class="mini-log" id="log-{{ sc_sid }}" style="max-height:100px;min-height:60px;font-size:0.7rem;"><div class="hl">Waiting...</div></div>
+      </div>
+      {% endfor %}
+      </div>
+    </div>
   </div>
-  <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      for (const s of ['sw','sr']) {
-        var el = document.getElementById('lots-' + s);
-        if (el) el.style.display = 'none';
-      }
-    });
 
-    var mtPositions = [];
-
-    async function scanMt() {
-      const r = await fetch('/api/mt-scan', {method:'POST'});
-      const d = await r.json();
-      const container = document.getElementById('mt-positions');
-      if (!d.ok) { container.innerHTML = '<div style="color:#f85149;">Error: ' + d.error + '</div>'; container.style.display='block'; return; }
-      if (!d.positions.length) { container.innerHTML = '<div>No positions found.</div>'; container.style.display='block'; return; }
-      mtPositions = d.positions;
-      let html = '<table style="width:100%;font-size:0.85rem;border-collapse:collapse;">';
-      html += '<tr style="color:#8b949e;"><th style="padding:4px;text-align:left;">Side</th><th style="padding:4px;text-align:left;">Symbol</th><th style="padding:4px;text-align:right;">Qty</th><th style="padding:4px;text-align:right;">Avg</th><th style="padding:4px;text-align:right;">LTP</th><th style="padding:4px;text-align:right;">SL price</th><th style="padding:4px;"></th></tr>';
-      for (let i = 0; i < d.positions.length; i++) {
-        const p = d.positions[i];
-        html += '<tr>';
-        html += '<td style="padding:4px;">'+p.side+'</td>';
-        html += '<td style="padding:4px;max-width:140px;overflow:hidden;text-overflow:ellipsis;">'+p.tsym+'</td>';
-        html += '<td style="padding:4px;text-align:right;">'+p.qty+'</td>';
-        html += '<td style="padding:4px;text-align:right;">₹'+p.avg_price.toFixed(2)+'</td>';
-        html += '<td style="padding:4px;text-align:right;">₹'+p.ltp.toFixed(2)+'</td>';
-        html += '<td style="padding:4px;text-align:right;"><input type="number" id="mt-sl-'+i+'" value="" placeholder="SL price" min="0.01" step="0.01" max="99999" style="width:70px;padding:4px;border-radius:4px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;"></td>';
-        html += '<td style="padding:4px;"><button class="btn btn-sm" onclick="setMt('+i+')" id="mt-set-'+i+'">Set</button></td>';
-        html += '</tr>';
-      }
-      html += '</table>';
-      container.innerHTML = html;
-      container.style.display = 'block';
-    }
-
-    async function setMt(i) {
-      const p = mtPositions[i];
-      if (!p) return;
-      const slInput = document.getElementById('mt-sl-'+i);
-      const sl_price = parseFloat(slInput.value);
-      if (!sl_price || sl_price <= 0) { alert('Enter a valid SL price'); return; }
-      const status = await (await fetch('/api/status')).json();
-      const running = status.strategies && status.strategies['mt'];
-      const endpoint = running ? '/api/mt-add' : '/api/mt-start';
-      const r = await fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({trades:[{...p, sl_price}]})});
-      const d = await r.json();
-      if (!d.ok) { alert('Error: ' + d.error); return; }
-      const btn = document.getElementById('mt-set-'+i);
-      if (btn) { btn.textContent = '✓'; btn.disabled = true; btn.style.opacity = '0.6'; }
-      await fetchStatus();
-    }
-  </script>
-
-  <!-- Settings tabs -->
+  <!-- SETTINGS -->
   <div class="card">
     <div class="tab-bar">
-      <button class="active" data-tab="tab-login">Login</button>
-      <button data-tab="tab-api">API Keys</button>
+      <button class="active" data-tab="tab-login">&#128273; Login</button>
+      <button data-tab="tab-api">&#128295; API Keys</button>
     </div>
-
     <div id="tab-login" class="tab active">
       {% if has_api_key %}
         <div class="row mb-8">
@@ -494,18 +783,15 @@ PAGE = r"""<!DOCTYPE html>
           <button type="submit" class="btn btn-secondary">Save Token</button>
         </form>
       {% else %}
-        <div class="msg msg-info">
-          API Key not configured. Go to <strong>API Keys</strong> tab.
-        </div>
+        <div class="msg msg-info">API Key not configured. Go to <strong>API Keys</strong> tab.</div>
       {% endif %}
     </div>
-
     <div id="tab-api" class="tab">
       <form method="POST" action="/api/config" class="col">
         <input type="text" name="api_key" placeholder="API Key" value="{{ api_key }}">
         <input type="password" name="api_secret" placeholder="API Secret">
         <input type="password" name="dashboard_password" placeholder="Dashboard Password (leave blank to disable)">
-        <button type="submit" class="btn btn-primary">Save</button>
+        <button type="submit" class="btn btn-primary">Save Settings</button>
       </form>
       <div class="mt-8 text-xs">&#128274; Set a dashboard password to protect controls. <a href="/logout">Logout</a></div>
     </div>
@@ -514,221 +800,227 @@ PAGE = r"""<!DOCTYPE html>
 </div>
 
 <script>
-function $(id) { return document.getElementById(id); }
+function $(id){return document.getElementById(id)}
+const C={green:'#16C098',red:'#FF5C72',amber:'#F5A623',blue:'#5B8DEF',deepRed:'#E0344C'};
 
-document.querySelectorAll('[data-tab]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+// ── THEME ──
+function setActiveSwatch(t){
+  document.querySelectorAll('[data-theme-option]').forEach(b=>b.classList.toggle('active',b.dataset.themeOption===t));
+}
+setActiveSwatch(document.documentElement.getAttribute('data-theme')||'terminal');
+document.querySelectorAll('[data-theme-option]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const t=btn.dataset.themeOption;
+    document.documentElement.setAttribute('data-theme',t);
+    try{localStorage.setItem('dashTheme',t)}catch(e){}
+    setActiveSwatch(t);
+  });
+});
+
+// ── LIVE CLOCK ──
+function updateClock(){
+  const n=new Date();
+  $('live-clock').textContent=n.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+}
+setInterval(updateClock,1000);updateClock();
+
+// ── TABS ──
+document.querySelectorAll('[data-tab]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tab-bar button').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
     btn.classList.add('active');
     $(btn.dataset.tab).classList.add('active');
   });
 });
 
-async function action(strategy, cmd) {
-  if (cmd === 'start' || cmd === 'resume') {
-    var extra = '';
-    var inp = document.getElementById('lots-input-' + strategy);
-    if (inp) extra += '&lots=' + (parseInt(inp.value) || 1);
-    if (strategy === 'sc') {
-      ['NIFTY','BANKNIFTY','SENSEX'].forEach(sym => {
-        var cb = document.getElementById('sc-sym-' + sym);
-        if (cb && cb.checked) extra += '&sc_' + sym + '=1';
-      });
-    }
-    var sl_inp = document.getElementById('sl-input-' + strategy);
-    var sl_inp = document.getElementById('sl-input-' + strategy);
-    if (sl_inp) extra += '&sl=' + (parseInt(sl_inp.value) || 50);
-    await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy + '&resume=' + (cmd === 'resume' ? '1' : '0') + extra });
-  } else {
-    await fetch('/api/stop', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy });
+// ── ACTION ──
+async function action(strategy,cmd){
+  if(cmd==='start'||cmd==='resume'){
+    var extra='';
+    var inp=document.getElementById('lots-input-'+strategy);
+    if(inp) extra+='&lots='+(parseInt(inp.value)||1);
+    var sym=document.getElementById('sym-'+strategy);
+    if(sym) extra+='&symbol='+sym.value;
+    await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'strategy='+strategy+'&resume='+(cmd==='resume'?'1':'0')+extra});
+  }else{
+    await fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'strategy='+strategy});
   }
   await fetchStatus();
 }
 
-async function fetchStatus() {
-  try {
-    const d = await (await fetch('/api/status')).json();
-    const hb = d.heartbeat || '---';
-    $('s-heartbeat').textContent = hb.length > 30 ? hb.slice(0, 28) + '...' : hb;
-    const tk = $('s-token');
-    if (d.token_ok) { tk.textContent = 'OK'; tk.className = 'value green'; }
-    else if (d.token_ok === false) { tk.textContent = 'EXPIRED'; tk.className = 'value red'; }
-    else { tk.textContent = '---'; tk.className = 'value'; }
-    let count = 0;
-    var runningNames = [];
-    for (const s of ['ic','cs','sma','mt','bnf','n1h','sc','sw','sr','ratio']) {
-      const running = d.strategies && d.strategies[s];
-      if (running) { count++; runningNames.push(s.toUpperCase()); }
-      const dot = $('dot-' + s);
-      dot.className = 'dot ' + (running ? 'green' : 'red');
-      $('s-' + s).textContent = running ? 'RUNNING' : 'STOPPED';
-      const startBtn = $('start-' + s);
-      if (startBtn) startBtn.disabled = running;
-      $('stop-' + s).disabled = !running;
-      const ri = $('resume-' + s);
-      const rb = $('resume-btn-' + s);
-      if (d.positions && d.positions[s]) {
-        ri.style.display = 'inline';
-        ri.title = 'Expiry: ' + d.positions[s].expiry + ' | Credit: ?' + d.positions[s].entry_credit;
-        if (!running) { rb.style.display = 'inline'; }
-      } else {
-        ri.style.display = 'none';
-        rb.style.display = 'none';
-      }
-      if (s === 'mt') {
-        const scanBtn = $('scan-mt');
-        if (scanBtn) scanBtn.style.display = 'inline-block';
-      }
+// ── STATUS ──
+async function fetchStatus(){
+  try{
+    const d=await(await fetch('/api/status')).json();
+    const hb=d.heartbeat||'---';
+    $('s-heartbeat').textContent=hb.length>30?hb.slice(0,28)+'...':hb;
+    const tk=$('s-token');
+    if(d.token_ok){tk.textContent='OK';tk.className='sp-value green';}
+    else if(d.token_ok===false){tk.textContent='EXPIRED';tk.className='sp-value red';}
+    else{tk.textContent='---';tk.className='sp-value';}
+    let count=0;var runningNames=[];let scRunning=false;
+    for(const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio','sc_nifty','sc_bnf','sc_sensex']){
+      const running=d.strategies&&d.strategies[s];
+      if(s.startsWith('sc_')){if(running)scRunning=true;}
+      else{if(running){count++;runningNames.push(s.toUpperCase());}}
+      const dot=$('dot-'+s);
+      const badge=$('sb-'+s);
+      if(dot)dot.style.display=running?'inline':'none';
+      if(badge)badge.className='status-badge'+(running?' running':'');
+      $('s-'+s).textContent=running?'RUNNING':'STOPPED';
+      const cardEl=$('strat-'+s);
+      if(cardEl)cardEl.classList.toggle('is-running',running);
+      const startBtn=$('start-'+s);
+      if(startBtn)startBtn.disabled=running;
+      const stopBtn=$('stop-'+s);
+      if(stopBtn)stopBtn.disabled=!running;
+      const ri=$('resume-'+s);
+      const rb=$('resume-btn-'+s);
+      if(d.positions&&d.positions[s]){
+        ri.style.display='inline';
+        ri.title='Expiry: '+d.positions[s].expiry+' | Credit: '+d.positions[s].entry_credit;
+        if(!running){rb.style.display='inline';}
+      }else{ri.style.display='none';rb.style.display='none';}
+      if(s==='mt'){const scanBtn=$('scan-mt');if(scanBtn)scanBtn.style.display='inline-block';}
     }
-    $('s-count').textContent = count + '/10';
-    $('s-running-list').textContent = runningNames.length ? runningNames.join(', ') : 'none';
-  } catch(e) {}
+    if(scRunning){count++;runningNames.push('SCALPER');}
+    $('s-count').textContent=count+'/10';
+    $('s-running-list').textContent=runningNames.length?runningNames.join(', '):'';
+  }catch(e){}
 }
-setInterval(fetchStatus, 5000);
-fetchStatus();
+setInterval(fetchStatus,5000);fetchStatus();
 
-async function killSwitch() {
-  if (!confirm('⚠️ EMERGENCY KILL SWITCH\n\nThis will square off ALL open positions and halt ALL strategies. Continue?')) return;
-  const btn = document.getElementById('btn-kill');
-  btn.disabled = true;
-  btn.textContent = '⏳ KILLING...';
-  try {
-    const r = await fetch('/api/kill_switch', {method:'POST'});
-    const d = await r.json();
-    if (d.ok) {
-      alert('✅ Kill switch executed.\n\n' + d.message);
-    } else {
-      alert('❌ Error: ' + (d.error || 'unknown'));
+// ── LOGS ──
+async function fetchLogs(){
+  try{
+    for(const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio','sc_nifty','sc_bnf','sc_sensex']){
+      const d=await(await fetch('/api/log?strategy='+s)).json();
+      const box=$('log-'+s);
+      if(d.output&&d.output.length){
+        box.innerHTML=d.output.slice(-30).map(l=>'<div>'+l.replace(/</g,'&lt;')+'</div>').join('');
+        box.scrollTop=box.scrollHeight;
+      }
     }
-  } catch(e) {
-    alert('❌ Request failed: ' + e.message);
+  }catch(e){}
+}
+setInterval(fetchLogs,5000);fetchLogs();
+
+// ── MARKET ──
+async function fetchMarket(){
+  try{
+    const d=await(await fetch('/api/market')).json();
+    if(d.error)return;
+    for(const [prefix,key] of [['nifty','nifty'],['sensex','sensex'],['banknifty','banknifty']]){
+      const v=d[key];if(!v)continue;
+      const spotEl=$('m-'+prefix+'-spot');
+      spotEl.textContent=v.spot.toLocaleString('en-IN',{minimumFractionDigits:2});
+      spotEl.className='mkt-spot '+(v.change>=0?'green':'red');
+      $('m-'+prefix+'-chg').textContent=(v.change>=0?'+':'')+v.change.toFixed(2)+' ('+(v.change_pct>=0?'+':'')+v.change_pct.toFixed(2)+'%)';
+      $('m-'+prefix+'-chg').style.color=v.change>=0?C.green:C.red;
+      $('m-'+prefix+'-open').textContent=v.open.toLocaleString('en-IN',{minimumFractionDigits:2});
+      $('m-'+prefix+'-high').textContent=v.high.toLocaleString('en-IN',{minimumFractionDigits:2});
+      $('m-'+prefix+'-low').textContent=v.low.toLocaleString('en-IN',{minimumFractionDigits:2});
+      $('m-'+prefix+'-range').textContent=(v.high-v.low).toLocaleString('en-IN',{minimumFractionDigits:2})+' pts';
+    }
+    if(d.pcr){
+      $('m-pcr').textContent=d.pcr.toFixed(2);
+      let sc=C.amber;
+      if(d.sentiment.includes('STRONG BEAR'))sc=C.red;
+      else if(d.sentiment.includes('BEARISH'))sc=C.deepRed;
+      else if(d.sentiment.includes('WEAK BEAR'))sc=C.amber;
+      else if(d.sentiment.includes('WEAK BULL'))sc=C.blue;
+      else if(d.sentiment.includes('BULLISH')||d.sentiment.includes('STRONG BULL'))sc=C.green;
+      $('m-pcr').style.color=sc;
+      $('m-sentiment').textContent=d.sentiment;
+      $('m-sentiment').style.color=sc;
+      $('m-ce-oi').textContent=(d.ce_oi/1e7).toFixed(2)+'Cr';
+      $('m-pe-oi').textContent=(d.pe_oi/1e7).toFixed(2)+'Cr';
+    }
+    $('market-time').textContent='Updated: '+(d.time||'');
+  }catch(e){}
+}
+setInterval(fetchMarket,15000);fetchMarket();
+
+// ── TRADES ──
+async function fetchTrades(){
+  try{
+    const d=await(await fetch('/api/trades')).json();
+    if(d.error)return;
+    $('trade-date').textContent=d.date;
+    $('td-running').textContent=d.running_trades;
+    $('td-running-list').textContent=d.running_details.join(', ')||'none';
+    $('td-closed').textContent=d.closed_trades;
+    $('td-closed-list').textContent=Object.entries(d.by_strategy).map(([k,v])=>k+':'+v).join(', ')||'none';
+    const pnlCls=d.closed_pnl>=0?'green':'red';
+    $('td-pnl').textContent='\u20B9'+d.closed_pnl.toLocaleString('en-IN',{minimumFractionDigits:2});
+    $('td-pnl').className='sum-value '+pnlCls;
+    if(d.live_pnl!==undefined){
+      const lc=d.live_pnl>=0?C.green:C.red;
+      $('td-live-pnl').textContent='\u20B9'+d.live_pnl.toLocaleString('en-IN',{minimumFractionDigits:2});
+      $('td-live-pnl').style.color=lc;
+      $('td-live-pos').textContent=(d.live_positions||0)+' positions';
+    }
+    $('td-chg-running').textContent='\u20B9'+(d.est_charges_running||0).toLocaleString('en-IN');
+    $('td-chg-closed').textContent='\u20B9'+(d.actual_charges_closed||0).toLocaleString('en-IN');
+    const net=(d.closed_pnl||0)-(d.total_charges||0);
+    $('td-net').textContent='\u20B9'+net.toLocaleString('en-IN',{minimumFractionDigits:2});
+    $('td-net').className='sum-value '+(net>=0?'green':'red');
+  }catch(e){}
+}
+setInterval(fetchTrades,10000);fetchTrades();
+
+// ── MT SCAN ──
+var mtPositions=[];
+async function scanMt(){
+  const r=await fetch('/api/mt-scan',{method:'POST'});
+  const d=await r.json();
+  const c=$('mt-positions');
+  if(!d.ok){c.innerHTML='<div style="color:var(--red);padding:8px;">Error: '+d.error+'</div>';c.style.display='block';return;}
+  if(!d.positions.length){c.innerHTML='<div style="padding:8px;color:var(--text-dim);">No positions found.</div>';c.style.display='block';return;}
+  mtPositions=d.positions;
+  let h='<table class="mt-table">';
+  h+='<tr><th>Side</th><th>Symbol</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Avg</th><th style="text-align:right;">LTP</th><th style="text-align:right;">SL</th><th></th></tr>';
+  for(let i=0;i<d.positions.length;i++){
+    const p=d.positions[i];
+    h+='<tr>';
+    h+='<td>'+p.side+'</td>';
+    h+='<td style="max-width:130px;overflow:hidden;text-overflow:ellipsis;">'+p.tsym+'</td>';
+    h+='<td style="text-align:right;">'+p.qty+'</td>';
+    h+='<td style="text-align:right;">\u20B9'+p.avg_price.toFixed(2)+'</td>';
+    h+='<td style="text-align:right;">\u20B9'+p.ltp.toFixed(2)+'</td>';
+    h+='<td style="text-align:right;"><input type="number" id="mt-sl-'+i+'" placeholder="SL" min="0.01" step="0.01"></td>';
+    h+='<td><button class="btn btn-sm btn-secondary" onclick="setMt('+i+')" id="mt-set-'+i+'">Set</button></td>';
+    h+='</tr>';
   }
-  btn.disabled = false;
-  btn.textContent = '☠ KILL ALL';
+  h+='</table>';
+  c.innerHTML=h;c.style.display='block';
+}
+async function setMt(i){
+  const p=mtPositions[i];if(!p)return;
+  const slInput=$('mt-sl-'+i);
+  const sl_price=parseFloat(slInput.value);
+  if(!sl_price||sl_price<=0){alert('Enter a valid SL price');return;}
+  const status=await(await fetch('/api/status')).json();
+  const running=status.strategies&&status.strategies['mt'];
+  const endpoint=running?'/api/mt-add':'/api/mt-start';
+  const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trades:[{...p,sl_price}]})});
+  const d=await r.json();
+  if(!d.ok){alert('Error: '+d.error);return;}
+  const btn=$('mt-set-'+i);
+  if(btn){btn.textContent='\u2713';btn.disabled=true;btn.style.opacity='0.6';}
   await fetchStatus();
 }
 
-async function fetchLogs() {
-  try {
-    for (const s of ['ic','cs','sma','mt','bnf','n1h','sc','sw','sr','ratio']) {
-      const d = await (await fetch('/api/log?strategy=' + s)).json();
-      const box = $('log-' + s);
-      if (d.output && d.output.length) {
-        box.innerHTML = d.output.slice(-30).map(l => '<div>' + l.replace(/</g,'&lt;') + '</div>').join('');
-        box.scrollTop = box.scrollHeight;
-      }
-    }
-    // Per-symbol SC logs
-    for (const sym of ['NIFTY','BANKNIFTY','SENSEX']) {
-      const d = await (await fetch('/api/log?strategy=sc&symbol=' + sym)).json();
-      const box = $('log-sc-' + sym);
-      if (d.output && d.output.length) {
-        box.style.display = '';
-        box.innerHTML = d.output.slice(-30).map(l => '<div>' + l.replace(/</g,'&lt;') + '</div>').join('');
-        box.scrollTop = box.scrollHeight;
-      } else {
-        box.style.display = 'none';
-      }
-    }
-  } catch(e) {}
-}
-setInterval(fetchLogs, 5000);
-fetchLogs();
-
-async function fetchMarket() {
-  try {
-    const d = await (await fetch('/api/market')).json();
-    if (d.error) return;
-    const green = d.nifty && d.nifty.change >= 0;
-    for (const [prefix, key] of [['nifty','nifty'],['sensex','sensex'],['banknifty','banknifty']]) {
-      const v = d[key];
-      if (!v) continue;
-      const spotEl = $('m-' + prefix + '-spot');
-      spotEl.textContent = v.spot.toLocaleString('en-IN', {minimumFractionDigits:2});
-      spotEl.className = 'value ' + (v.change >= 0 ? 'green' : 'red');
-      $('m-' + prefix + '-chg').textContent = (v.change >= 0 ? '+' : '') + v.change.toFixed(2) + ' (' + (v.change_pct >= 0 ? '+' : '') + v.change_pct.toFixed(2) + '%)';
-      $('m-' + prefix + '-chg').style.color = v.change >= 0 ? '#3fb950' : '#f85149';
-      $('m-' + prefix + '-open').textContent = v.open.toLocaleString('en-IN', {minimumFractionDigits:2});
-      $('m-' + prefix + '-high').textContent = v.high.toLocaleString('en-IN', {minimumFractionDigits:2});
-      $('m-' + prefix + '-low').textContent = v.low.toLocaleString('en-IN', {minimumFractionDigits:2});
-      var range = v.high - v.low;
-      $('m-' + prefix + '-range').textContent = range.toLocaleString('en-IN', {minimumFractionDigits:2}) + ' pts';
-    }
-    if (d.pcr) {
-      $('m-pcr').textContent = d.pcr.toFixed(2);
-      $('m-pcr').className = 'value';
-      $('m-pcr').style.fontSize = '1.5rem';
-      let sentColor = '#d29922';
-      if (d.sentiment.includes('STRONG BEAR')) sentColor = '#f85149';
-      else if (d.sentiment.includes('BEARISH')) sentColor = '#da3633';
-      else if (d.sentiment.includes('WEAK BEAR')) sentColor = '#d29922';
-      else if (d.sentiment.includes('WEAK BULL')) sentColor = '#58a6ff';
-      else if (d.sentiment.includes('BULLISH') || d.sentiment.includes('STRONG BULL')) sentColor = '#3fb950';
-      $('m-pcr').style.color = sentColor;
-      $('m-sentiment').textContent = d.sentiment;
-      $('m-sentiment').style.color = sentColor;
-      $('m-ce-oi').textContent = (d.ce_oi / 1e7).toFixed(2) + 'Cr';
-      $('m-pe-oi').textContent = (d.pe_oi / 1e7).toFixed(2) + 'Cr';
-    }
-    $('market-time').textContent = 'Updated: ' + (d.time || '');
-  } catch(e) {}
-}
-setInterval(fetchMarket, 15000);
-fetchMarket();
-
-async function fetchTrades() {
-  try {
-    const d = await (await fetch('/api/trades')).json();
-    if (d.error) return;
-    $('trade-date').textContent = d.date;
-    $('td-running').textContent = d.running_trades;
-    $('td-running-list').textContent = d.running_details.join(', ') || 'none';
-    $('td-closed').textContent = d.closed_trades;
-    const stratList = Object.entries(d.by_strategy).map(([k,v]) => k + ':' + v).join(', ');
-    $('td-closed-list').textContent = stratList || 'none';
-    const isGreen = d.closed_pnl >= 0;
-    $('td-pnl').textContent = '₹' + d.closed_pnl.toLocaleString('en-IN', {minimumFractionDigits:2});
-    $('td-pnl').className = 'value';
-    $('td-pnl').style.fontSize = '1.3rem';
-    $('td-pnl').style.color = isGreen ? '#3fb950' : '#f85149';
-    // Live P&L from Zerodha
-    const livePnl = d.live_pnl;
-    if (livePnl !== undefined) {
-      const liveGreen = livePnl >= 0;
-      $('td-live-pnl').textContent = '₹' + livePnl.toLocaleString('en-IN', {minimumFractionDigits:2});
-      $('td-live-pnl').style.color = liveGreen ? '#3fb950' : '#f85149';
-      $('td-live-pos').textContent = (d.live_positions || 0) + ' positions';
-    }
-    $('td-chg-running').textContent = '₹' + (d.est_charges_running || 0).toLocaleString('en-IN');
-    $('td-chg-closed').textContent = '₹' + (d.actual_charges_closed || 0).toLocaleString('en-IN');
-    const net = (d.closed_pnl || 0) - (d.total_charges || 0);
-    $('td-net').textContent = '₹' + net.toLocaleString('en-IN', {minimumFractionDigits:2});
-    $('td-net').className = 'value';
-    $('td-net').style.fontSize = '1.3rem';
-    $('td-net').style.color = net >= 0 ? '#3fb950' : '#f85149';
-    // MTM limit display
-    var mtmEl = $('td-mtm');
-    if (d.mtm_total !== undefined) {
-      var mtmVal = d.mtm_total;
-      var mtmLimit = d.mtm_limit || 10000;
-      var mtmPct = (Math.abs(mtmVal) / mtmLimit * 100).toFixed(0);
-      mtmEl.textContent = '₹' + mtmVal.toLocaleString('en-IN', {minimumFractionDigits:2}) + ' / -₹' + mtmLimit.toLocaleString('en-IN');
-      mtmEl.style.color = mtmVal < -mtmLimit * 0.8 ? '#f85149' : (mtmVal < -mtmLimit * 0.5 ? '#d29922' : '#8b949e');
-      mtmEl.title = mtmPct + '% of daily loss limit used';
-    } else {
-      mtmEl.textContent = '--';
-    }
-  } catch(e) {}
-}
-setInterval(fetchTrades, 10000);
-fetchTrades();
-
-$('btn-login')?.addEventListener('click', () => {
-  $('login-hint').style.display = 'block';
+// ── DOM READY ──
+document.addEventListener('DOMContentLoaded',function(){
+  for(const s of ['sw','sr']){
+    var el=document.getElementById('lots-'+s);
+    if(el)el.style.display='none';
+  }
 });
-
-document.querySelectorAll('.msg-success, .msg-error').forEach(m => setTimeout(() => m.remove(), 8000));
+$('btn-login')?.addEventListener('click',()=>{$('login-hint').style.display='block';});
+document.querySelectorAll('.msg-success,.msg-error').forEach(m=>setTimeout(()=>m.remove(),8000));
 </script>
 </body>
 </html>"""
@@ -823,64 +1115,12 @@ def api_start():
     lots = request.form.get("lots", "1")
     if strategy not in STRATEGIES:
         return jsonify({"ok": False, "error": "Invalid strategy"}), 400
-    selected_symbols = []
-    if strategy == "sc":
-        for sym in ("NIFTY", "BANKNIFTY", "SENSEX"):
-            if request.form.get(f"sc_{sym}", "0") == "1":
-                selected_symbols.append(sym)
-        if not selected_symbols:
-            return jsonify({"ok": False, "error": "Select at least one symbol"}), 400
-        # Check if any sc subprocess is already running
-        for sym in selected_symbols:
-            proc = sc_processes.get(sym)
-            if proc and proc.poll() is None:
-                return jsonify({"ok": False, "error": f"SC {sym} already running"}), 400
-    else:
-        proc = bot_processes.get(strategy)
-        if proc and proc.poll() is None:
-            return jsonify({"ok": False, "error": f"{strategy.upper()} already running"}), 400
+    proc = bot_processes.get(strategy)
+    if proc and proc.poll() is None:
+        return jsonify({"ok": False, "error": f"{strategy.upper()} already running"}), 400
     if strategy in ("sw", "sr", "ratio"):
         scripts = {"sw": "swing_scanner.py", "sr": "swing_rebalancer.py", "ratio": "ratio_strategy.py"}
         cmd = [sys.executable, "-u", str(BOT_DIR / scripts[strategy])]
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(BOT_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=env,
-        )
-        bot_processes[strategy] = proc
-        with bot_output_locks[strategy]:
-            bot_outputs[strategy] = []
-        t = threading.Thread(target=_reader_thread, args=(strategy, proc), daemon=True)
-        t.start()
-    elif strategy == "sc":
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        for sym in selected_symbols:
-            cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy=sc", f"--symbol={sym}"]
-            if lots and lots != "1":
-                cmd.append(f"--lots={lots}")
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(BOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                env=env,
-            )
-            sc_processes[sym] = proc
-            sc_outputs[sym] = []
-            sc_output_locks[sym] = threading.Lock()
-            t = threading.Thread(target=_sc_reader_thread, args=(sym, proc), daemon=True)
-            t.start()
     else:
         cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy={strategy}"]
         if resume:
@@ -890,23 +1130,28 @@ def api_start():
         if strategy == "mt":
             sl = request.form.get("sl", "50")
             cmd.append(f"--sl={sl}")
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(BOT_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=env,
-        )
-        bot_processes[strategy] = proc
-        with bot_output_locks[strategy]:
-            bot_outputs[strategy] = []
-        t = threading.Thread(target=_reader_thread, args=(strategy, proc), daemon=True)
-        t.start()
+        if strategy.startswith("sc_"):
+            sym_map = {"sc_nifty": "NIFTY", "sc_bnf": "BANKNIFTY", "sc_sensex": "SENSEX"}
+            cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), "--strategy=sc", f"--symbol={sym_map.get(strategy, 'NIFTY')}"]
+            if lots and lots != "1":
+                cmd.append(f"--lots={lots}")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(BOT_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+    )
+    bot_processes[strategy] = proc
+    with bot_output_locks[strategy]:
+        bot_outputs[strategy] = []
+    t = threading.Thread(target=_reader_thread, args=(strategy, proc), daemon=True)
+    t.start()
     return jsonify({"ok": True, "strategy": strategy})
 
 
@@ -916,30 +1161,6 @@ def api_stop():
     strategy = request.form.get("strategy", "")
     if strategy not in STRATEGIES:
         return jsonify({"ok": False, "error": "Invalid strategy"}), 400
-    if strategy == "sc":
-        killed_any = False
-        for sym in list(sc_processes.keys()):
-            proc = sc_processes.get(sym)
-            if proc and proc.poll() is None:
-                if os.name == "nt":
-                    proc.terminate()
-                else:
-                    os.kill(proc.pid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                sc_processes[sym] = None
-                killed_any = True
-        if not killed_any:
-            return jsonify({"ok": False, "error": "SC not running"}), 400
-        cfg = load_config()
-        pos_key = "scalper_trade"
-        if cfg.get(pos_key):
-            cfg.pop(pos_key, None)
-            save_config(cfg)
-        return jsonify({"ok": True, "strategy": strategy})
     proc = bot_processes.get(strategy)
     if not proc or proc.poll() is not None:
         return jsonify({"ok": False, "error": f"{strategy.upper()} not running"}), 400
@@ -954,68 +1175,11 @@ def api_stop():
         proc.wait()
     bot_processes[strategy] = None
     cfg = load_config()
-    pos_key = {"ic": "position", "cs": "cs_position", "sc": "scalper_trade", "mt": "manual_trades"}.get(strategy)
+    pos_key = {"ic": "position", "cs": "cs_position", "mt": "manual_trades"}.get(strategy)
     if pos_key and cfg.get(pos_key):
         cfg.pop(pos_key, None)
         save_config(cfg)
     return jsonify({"ok": True, "strategy": strategy})
-
-
-@app.route("/api/kill_switch", methods=["POST"])
-@require_auth
-def api_kill_switch():
-    """Emergency kill switch — square off all positions and halt all strategies."""
-    # Phase 1: Kill all running bot subprocesses
-    killed = []
-    for s in STRATEGIES:
-        proc = bot_processes.get(s)
-        if proc and proc.poll() is None:
-            if os.name == "nt":
-                proc.terminate()
-            else:
-                os.kill(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            bot_processes[s] = None
-            killed.append(s)
-    # Kill SC subprocesses
-    for sym in list(sc_processes.keys()):
-        proc = sc_processes.get(sym)
-        if proc and proc.poll() is None:
-            if os.name == "nt":
-                proc.terminate()
-            else:
-                os.kill(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            sc_processes[sym] = None
-            killed.append(f"sc_{sym}")
-    # Phase 2: Launch the kill switch subprocess to square off positions
-    try:
-        kill_proc = subprocess.Popen(
-            [sys.executable, "-u", str(BOT_SCRIPT), "--kill"],
-            cwd=str(BOT_DIR),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            encoding="utf-8", errors="replace",
-        )
-        kill_proc.wait(timeout=60)
-    except subprocess.TimeoutExpired:
-        kill_proc.kill()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Kill switch execution error: {e}"}), 500
-    # Phase 3: Clear saved position configs
-    cfg = load_config()
-    for key in ("position", "cs_position", "scalper_trade", "manual_trades"):
-        cfg.pop(key, None)
-    save_config(cfg)
-    msg = f"Emergency kill switch executed. Killed strategies: {', '.join(killed) if killed else 'none'}"
-    return jsonify({"ok": True, "message": msg, "killed": killed})
 
 
 @app.route("/api/mt-scan", methods=["POST"])
@@ -1044,7 +1208,7 @@ def api_mt_scan():
             positions.append(p)
 
     tracked_tsyms = set()
-    for key in ("position", "cs_position", "scalper_trade"):
+    for key in ("position", "cs_position"):
         saved = cfg.get(key)
         if saved and "legs" in saved:
             for leg in saved["legs"]:
@@ -1189,11 +1353,8 @@ def api_mt_add():
 def api_status():
     running = {}
     for s in STRATEGIES:
-        if s == "sc":
-            running[s] = any(p and p.poll() is None for p in sc_processes.values())
-        else:
-            proc = bot_processes.get(s)
-            running[s] = proc is not None and proc.poll() is None
+        proc = bot_processes.get(s)
+        running[s] = proc is not None and proc.poll() is None
     heartbeat = ""
     if HEARTBEAT_FILE.exists():
         heartbeat = HEARTBEAT_FILE.read_text().strip()
@@ -1217,9 +1378,6 @@ def api_status():
         p = cfg["cs_position"]
         legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
         positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
-    if cfg.get("scalper_trade"):
-        p = cfg["scalper_trade"]
-        positions["sc"] = {"expiry": p.get("expiry", ""), "entry_credit": p.get("entry_price", 0), "legs": [f"BUY {p.get('tsym','')} SL @ {p.get('sl',0)}"]}
     if cfg.get("manual_trades"):
         trades = cfg["manual_trades"]
         if isinstance(trades, dict):
@@ -1239,12 +1397,6 @@ def api_status():
 @require_auth
 def api_log():
     strategy = request.args.get("strategy", "ic")
-    if strategy == "sc":
-        symbol = request.args.get("symbol", "NIFTY")
-        lock = sc_output_locks.get(symbol, threading.Lock())
-        with lock:
-            out = list(sc_outputs.get(symbol, []))
-        return jsonify({"output": out[-100:]})
     if strategy not in STRATEGIES:
         strategy = "ic"
     with bot_output_locks[strategy]:
@@ -1480,10 +1632,6 @@ def api_trades():
 
     total_charges = round(closed["charges"] + running_charges, 2)
 
-    # Compute total MTM (closed + live) for dashboard display
-    mtm_total = round(closed["pnl"] + (live_pnl or 0), 2)
-    mtm_limit = 10000.0
-
     return jsonify({
         "date": today,
         "closed_trades": closed["total"],
@@ -1496,8 +1644,6 @@ def api_trades():
         "running_details": running_details,
         "live_pnl": round(live_pnl, 2) if live_pnl is not None else None,
         "live_positions": live_positions,
-        "mtm_total": mtm_total,
-        "mtm_limit": mtm_limit,
     })
 
 

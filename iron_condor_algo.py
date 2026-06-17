@@ -3955,16 +3955,47 @@ class ManualTradeManager:
         exchange = trade["exchange"]
         side = trade["side"]
         reverse = "SELL" if side == "BUY" else "BUY"
-        oid = None
+        exit_reason = "SL_HIT"
+
+        # Check if position still exists
+        position_exists = False
         try:
-            oid = self.kite.place_market(tsym, reverse, qty, exchange=exchange)
-            print(f"  Closed {tsym}")
-        except Exception as e:
-            print(f"  Close error: {e}")
+            pos_data = self.kite.kite.positions()
+            for key in ("day", "net"):
+                for p in pos_data.get(key, []):
+                    if p.get("tradingsymbol") == tsym and abs(p.get("quantity", 0)) >= qty:
+                        position_exists = True
+                        break
+        except Exception:
+            pass
+
+        oid = None
         exit_prem = 0
-        if oid:
-            fills = self.kite.get_fill_prices({tsym: oid})
-            exit_prem = fills.get(tsym, 0)
+
+        if position_exists:
+            try:
+                oid = self.kite.place_market(tsym, reverse, qty, exchange=exchange)
+                print(f"  Closed {tsym}")
+            except Exception as e:
+                print(f"  Close error: {e}")
+            if oid:
+                fills = self.kite.get_fill_prices({tsym: oid})
+                exit_prem = fills.get(tsym, 0)
+        else:
+            exit_reason = "MANUAL_CLOSE"
+            print(f"  {tsym} already closed manually — fetching exit price")
+            # Try to get actual exit fill from today's trades
+            try:
+                all_trades = self.kite.kite.trades()
+                for t in all_trades:
+                    if t.get("tradingsymbol") == tsym and t.get("transaction_type") == reverse:
+                        exit_prem = float(t.get("average_price", t.get("price", 0)))
+                        break
+            except Exception:
+                pass
+            if exit_prem == 0:
+                exit_prem = self._get_premium(tsym, exchange)
+
         entry_prem = trade["entry_price"]
         pnl = (exit_prem - entry_prem) * qty if side == "BUY" else (entry_prem - exit_prem) * qty
         charges = calc_charges([{"action": side, "premium": entry_prem}], qty, exchange=exchange)
@@ -3982,7 +4013,7 @@ class ManualTradeManager:
             "charges": charges,
             "max_profit_target": 0,
             "stop_loss": round(trade.get("entry_sl", 0), 2),
-            "exit_reason": "SL_HIT",
+            "exit_reason": exit_reason,
         })
 
 
