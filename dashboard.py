@@ -1365,14 +1365,31 @@ def api_status():
         except Exception:
             token_ok = False
     positions = {}
+    # Fetch actual open symbols to cross-reference config positions
+    actual_tsyms: set[str] = set()
+    if access_token and api_key:
+        try:
+            k2 = KiteConnect(api_key=api_key, access_token=access_token, timeout=8)
+            pos_data = k2.positions()
+            for key in ("net", "day"):
+                for p in pos_data.get(key, []):
+                    if int(p.get("quantity", 0)) != 0 and p.get("tradingsymbol"):
+                        actual_tsyms.add(p["tradingsymbol"])
+        except Exception:
+            pass
+
     if cfg.get("position"):
         p = cfg["position"]
-        legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
-        positions["ic"] = {"expiry": p["expiry"], "entry_credit": p["entry_credit"], "legs": legs_info}
+        leg_tsyms = {l.get("tradingsymbol", "") for l in p.get("legs", []) if l.get("tradingsymbol")}
+        if not actual_tsyms or any(t in actual_tsyms for t in leg_tsyms):
+            legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
+            positions["ic"] = {"expiry": p["expiry"], "entry_credit": p["entry_credit"], "legs": legs_info}
     if cfg.get("cs_position"):
         p = cfg["cs_position"]
-        legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
-        positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
+        leg_tsyms = {l.get("tradingsymbol", "") for l in p.get("legs", []) if l.get("tradingsymbol")}
+        if not actual_tsyms or any(t in actual_tsyms for t in leg_tsyms):
+            legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
+            positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
     if running.get("mt") and cfg.get("manual_trades"):
         trades = cfg["manual_trades"]
         if isinstance(trades, dict):
@@ -1635,20 +1652,33 @@ def api_trades():
     running = 0
     running_details = []
 
-    # Collect tracked symbols from manual_trades config
-    mt_tsyms: set[str] = set()
+    # Collect tracked symbols from config positions
+    config_tsyms: dict[str, set[str]] = {"IC": set(), "CS": set(), "MT": set()}
+
+    if cfg.get("position"):
+        for leg in cfg["position"].get("legs", []):
+            tsym = leg.get("tradingsymbol", "")
+            if tsym:
+                config_tsyms["IC"].add(tsym)
+    if cfg.get("cs_position"):
+        for leg in cfg["cs_position"].get("legs", []):
+            tsym = leg.get("tradingsymbol", "")
+            if tsym:
+                config_tsyms["CS"].add(tsym)
     if cfg.get("manual_trades"):
         trades = cfg["manual_trades"]
         if isinstance(trades, dict):
             trades = [trades]
-        mt_tsyms = {t["tsym"] for t in trades if "tsym" in t}
+        config_tsyms["MT"] = {t["tsym"] for t in trades if "tsym" in t}
 
-    for key, label in [("position", "IC"), ("cs_position", "CS"), ("manual_trades", "MT")]:
-        if key == "manual_trades":
-            if mt_tsyms and (not actual_open_tsyms or any(t in actual_open_tsyms for t in mt_tsyms)):
-                running += 1
-                running_details.append(label)
-        elif cfg.get(key):
+    for key, label, tsyms in [("position", "IC", config_tsyms["IC"]),
+                               ("cs_position", "CS", config_tsyms["CS"]),
+                               ("manual_trades", "MT", config_tsyms["MT"])]:
+        if tsyms and (not actual_open_tsyms or any(t in actual_open_tsyms for t in tsyms)):
+            running += 1
+            running_details.append(label)
+        elif key != "manual_trades" and cfg.get(key) and not tsyms:
+            # Config exists but no symbols to check — conservative: count as running
             running += 1
             running_details.append(label)
     for s, proc in bot_processes.items():
