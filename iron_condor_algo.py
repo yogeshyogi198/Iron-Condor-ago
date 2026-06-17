@@ -473,7 +473,6 @@ SCALP_SUPERTREND_LENGTH = 10
 SCALP_SUPERTREND_MULTIPLIER = 3.0
 SCALP_TRAIL_BREAKEVEN_RR = 1.0        # trail to breakeven at 1:1 RR
 SCALP_TRAIL_INCREMENT_RR = 1.5        # further trail in 1:1.5 increments
-SCALP_SL_PERCENT = 0.10               # initial SL as fraction of entry premium
 
 # ---------------------------------------------------------------------------
 # Credit Spread params (trend-following with ADX + 200 EMA)
@@ -1817,37 +1816,43 @@ class SmaCrossover:
         return (now.hour == 13) or (now.hour == 14 and now.minute <= 30)
 
     def _manage_trades(self):
-        spot = self._get_sensex_spot()
-        if spot is None:
-            return
         to_remove = []
         for trade in self.trades:
             if trade.get("carryover"):
                 if not self._trade_has_position(trade):
                     to_remove.append(trade)
                 continue
+            tsym = trade["tsym"]
+            current_prem = 0
+            try:
+                ltp = self.kite.kite.ltp(f"{SENSEX_EXCHANGE}:{tsym}")
+                current_prem = ltp.get(f"{SENSEX_EXCHANGE}:{tsym}", {}).get("last_price", 0)
+            except Exception:
+                pass
+            if current_prem <= 0:
+                continue
             side = trade["side"]
             entry_price = trade["entry_price"]
             sl = trade["sl"]
             target_level = trade["target_level"]
-            points = abs(spot - entry_price)
-            is_buy = (side == "CE")
+            points = abs(current_prem - entry_price)
             risk = abs(entry_price - trade["entry_sl"])
             rr = points / risk if risk > 0 else 0
-            log.debug(f"MANAGE: {trade['tsym']} spot={spot:.2f} entry={entry_price} sl={sl} points={points:.0f} rr={rr:.2f} target_lvl={target_level}")
-            if (is_buy and spot <= sl) or (not is_buy and spot >= sl):
-                print(f"  SL hit {trade['tsym']} @ {spot:.2f}, closing")
-                log.debug(f"SL HIT: {trade['tsym']} spot={spot:.2f} sl={sl}")
+            log.debug(f"MANAGE: {tsym} premium={current_prem:.2f} entry={entry_price} sl={sl} points={points:.0f} rr={rr:.2f} target_lvl={target_level}")
+            # Both CE and PE are long premium, SL is below entry
+            if current_prem <= sl:
+                print(f"  SL hit {tsym} @ ₹{current_prem:.2f}")
+                log.debug(f"SL HIT: {tsym} premium={current_prem:.2f} sl={sl}")
                 self._exit_trade(trade)
                 to_remove.append(trade)
             else:
                 if rr >= target_level + 1:
-                    new_sl = entry_price + (target_level + 1) * risk if is_buy else entry_price - (target_level + 1) * risk
-                    if (is_buy and new_sl > sl) or (not is_buy and new_sl < sl):
+                    new_sl = entry_price + (target_level + 1) * risk
+                    if new_sl > sl:
                         trade["sl"] = new_sl
                         trade["target_level"] = target_level + 1
-                        print(f"  Trail {trade['tsym']} SL to {new_sl:.2f} (RR {target_level+1}:1)")
-                        log.debug(f"TRAIL: {trade['tsym']} new_sl={new_sl:.2f} rr_target={target_level+1}")
+                        print(f"  Trail {tsym} SL to {new_sl:.2f} (RR {target_level+1}:1)")
+                        log.debug(f"TRAIL: {tsym} new_sl={new_sl:.2f} rr_target={target_level+1}")
         for t in to_remove:
             if t in self.trades:
                 self.trades.remove(t)
@@ -1879,7 +1884,7 @@ class SmaCrossover:
             "expiry": trade.get("expiry", ""),
             "entry_time": trade.get("entry_ts", ""),
             "exit_time": datetime.now().isoformat(),
-            "entry_spot": round(trade.get("entry_price", 0), 2),
+            "entry_spot": round(trade.get("entry_spot", 0), 2),
             "exit_spot": round(exit_spot, 2),
             "entry_credit": round(entry_prem, 2),
             "exit_value": round(exit_prem, 2),
@@ -1998,24 +2003,11 @@ class SmaCrossover:
             log.warning("SMA SENSEX entry blocked — system halted.")
             return False
         side_str = "BUY"
-        entry_price = self._get_sensex_spot()
-        if entry_price is None:
-            return False
 
         tsym = opt["tsym"]
         qty = opt["qty"] * self.lots
 
-        # SL at entry candle low (CE) or high (PE)
-        if side == "CE":
-            sl = entry_candle["low"]
-            entry_sl = sl
-        else:
-            sl = entry_candle["high"]
-            entry_sl = sl
-
-        risk = abs(entry_price - sl)
-        target_price = entry_price + risk if side == "CE" else entry_price - risk
-
+        # Get option premium and entry candle data
         entry_prem = 0
         try:
             ltp = self.kite.kite.ltp(f"{SENSEX_EXCHANGE}:{tsym}")
@@ -2035,8 +2027,6 @@ class SmaCrossover:
             log.debug(f"ENTER FAILED: {tsym} {e}")
             return False
 
-        log.debug(f"ENTRY: side={side} spot={entry_price} sl={sl} target_price={target_price} risk={risk}")
-
         # Fetch actual fill price if market order
         fill_prem = entry_prem
         if is_market_open() and oid:
@@ -2047,10 +2037,35 @@ class SmaCrossover:
                 fill_prem = fills[tsym]
                 log.debug(f"ENTRY fill: {tsym} LTP={entry_prem} fill={fill_prem}")
 
+        # SL = option's own 3-min candle low (premium level), fallback to previous candle low
+        sl = 0
+        try:
+            opt_token = None
+            self.kite._fetch_instruments()
+            for r in self.kite._instruments:
+                if r["tradingsymbol"] == tsym:
+                    opt_token = int(r["instrument_token"])
+                    break
+            if opt_token:
+                to_dt = datetime.now()
+                opt_candles = self.kite.kite.historical_data(opt_token, to_dt - timedelta(hours=1), to_dt, "3minute")
+                if opt_candles and len(opt_candles) >= 2:
+                    sl = opt_candles[-1]["low"]
+                    if sl <= 0 or sl >= fill_prem:
+                        sl = opt_candles[-2]["low"]
+        except Exception:
+            pass
+        if sl <= 0 or sl >= fill_prem:
+            print(f"  {red('✗')} Could not determine option candle low for {tsym}")
+            return False
+
+        risk = abs(fill_prem - sl)
+        log.debug(f"ENTRY: side={side} tsym={tsym} premium={fill_prem} sl={sl} risk={risk}")
+
         trade = {
             "side": side,
-            "entry_price": entry_price,
-            "entry_sl": entry_sl,
+            "entry_price": fill_prem,
+            "entry_sl": sl,
             "sl": sl,
             "target_level": 1.0,
             "qty": qty,
@@ -2059,6 +2074,7 @@ class SmaCrossover:
             "expiry": opt["expiry"],
             "entry_ts": datetime.now().isoformat(),
             "entry_prem": fill_prem,
+            "entry_spot": self._get_sensex_spot() or 0,
         }
         self.trades.append(trade)
         self.trades_today += 1
@@ -3313,7 +3329,27 @@ class Scalper3Min:
         tsym = opt["tsym"]
         qty = opt["lot_size"] * self.lots
         entry_prem = self._get_option_premium(tsym)
-        sl_price = entry_prem * (1 - SCALP_SL_PERCENT) if is_ce else entry_prem * (1 + SCALP_SL_PERCENT)
+
+        # SL = option's own 3-min candle low (premium level), fallback to previous candle low
+        sl_price = 0
+        try:
+            opt_token = None
+            for r in self.kite._instruments:
+                if r["tradingsymbol"] == tsym:
+                    opt_token = int(r["instrument_token"])
+                    break
+            if opt_token:
+                to_dt = datetime.now()
+                opt_candles = self.kite.kite.historical_data(opt_token, to_dt - timedelta(hours=1), to_dt, SCALP_TIMEFRAME)
+                if opt_candles and len(opt_candles) >= 2:
+                    sl_price = opt_candles[-1]["low"]
+                    if sl_price <= 0 or sl_price >= entry_prem:
+                        sl_price = opt_candles[-2]["low"]
+        except Exception:
+            pass
+        if sl_price <= 0 or sl_price >= entry_prem:
+            print(f"  {red('✗')} Could not determine option candle low for {tsym}")
+            return False
         risk = abs(entry_prem - sl_price)
 
         print(f"  {bold(green('ENTER'))} {self.symbol} {side} {tsym} x{qty} @ ₹{entry_prem:.2f} | SL ₹{sl_price:.2f}")
@@ -3372,8 +3408,8 @@ class Scalper3Min:
         sl = t["sl"]
         init_risk = t["init_risk"]
 
-        # SL hit check
-        if (is_ce and current_prem <= sl) or (not is_ce and current_prem >= sl):
+        # SL hit check — both CE and PE are long premium, SL is below entry
+        if current_prem <= sl:
             print(f"  SL hit {tsym} @ ₹{current_prem:.2f}")
             return "SL_HIT"
 
@@ -3392,8 +3428,8 @@ class Scalper3Min:
             # 1:1.5 / 3.0 / 4.5 ... increments
             target_rr = SCALP_TRAIL_BREAKEVEN_RR + SCALP_TRAIL_INCREMENT_RR * t["trail_level"]
             if rr >= target_rr and t["trail_level"] >= 1:
-                new_sl = entry + (target_rr - SCALP_TRAIL_INCREMENT_RR) * init_risk if is_ce else entry - (target_rr - SCALP_TRAIL_INCREMENT_RR) * init_risk
-                if (is_ce and new_sl > t["sl"]) or (not is_ce and new_sl < t["sl"]):
+                new_sl = entry + (target_rr - SCALP_TRAIL_INCREMENT_RR) * init_risk
+                if new_sl > t["sl"]:
                     t["sl"] = new_sl
                     t["trail_level"] += 1
                     print(f"  Trail {tsym} SL to ₹{new_sl:.2f} (RR {target_rr:.1f}:1)")
