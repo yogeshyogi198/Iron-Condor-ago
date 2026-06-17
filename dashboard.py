@@ -856,11 +856,10 @@ async function fetchStatus(){
     if(d.token_ok){tk.textContent='OK';tk.className='sp-value green';}
     else if(d.token_ok===false){tk.textContent='EXPIRED';tk.className='sp-value red';}
     else{tk.textContent='---';tk.className='sp-value';}
-    let count=0;var runningNames=[];let scRunning=false;
+    let count=0;var runningNames=[];
     for(const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio','sc_nifty','sc_bnf','sc_sensex']){
       const running=d.strategies&&d.strategies[s];
-      if(s.startsWith('sc_')){if(running)scRunning=true;}
-      else{if(running){count++;runningNames.push(s.toUpperCase());}}
+      if(running){count++;runningNames.push(s.toUpperCase());}
       const dot=$('dot-'+s);
       const badge=$('sb-'+s);
       if(dot)dot.style.display=running?'inline':'none';
@@ -881,8 +880,7 @@ async function fetchStatus(){
       }else{ri.style.display='none';rb.style.display='none';}
       if(s==='mt'){const scanBtn=$('scan-mt');if(scanBtn)scanBtn.style.display='inline-block';}
     }
-    if(scRunning){count++;runningNames.push('SCALPER');}
-    $('s-count').textContent=count+'/10';
+    $('s-count').textContent=count+'/12';
     $('s-running-list').textContent=runningNames.length?runningNames.join(', '):'';
   }catch(e){}
 }
