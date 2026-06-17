@@ -963,7 +963,7 @@ async function fetchTrades(){
     }
     $('td-chg-running').textContent='\u20B9'+(d.est_charges_running||0).toLocaleString('en-IN');
     $('td-chg-closed').textContent='\u20B9'+(d.actual_charges_closed||0).toLocaleString('en-IN');
-    const net=(d.closed_pnl||0)-(d.total_charges||0);
+    const net=(d.closed_pnl||0)+(d.live_pnl||0)-(d.total_charges||0);
     $('td-net').textContent='\u20B9'+net.toLocaleString('en-IN',{minimumFractionDigits:2});
     $('td-net').className='sum-value '+(net>=0?'green':'red');
   }catch(e){}
@@ -1568,7 +1568,7 @@ def api_trades():
                     live_positions += 1
 
             # Estimated charges for running positions: use current LTP
-            day_positions = all_pos.get("day", [])
+            day_positions = all_pos.get("net", [])
             if day_positions:
                 # Group positions by exchange for batch quoting
                 by_exchange: dict[str, list] = {}
@@ -1617,18 +1617,6 @@ def api_trades():
             if short not in running_details:
                 running += 1
                 running_details.append(short)
-
-    # For running IC/CS positions that have leg details in config, compute exact estimate
-    for pos_key in ("position", "cs_position"):
-        pos = cfg.get(pos_key)
-        if pos and pos.get("legs"):
-            try:
-                leg_list = []
-                for leg in pos["legs"]:
-                    leg_list.append({"action": leg.get("action", ""), "premium": leg.get("premium", 0)})
-                running_charges += calc_charges(leg_list, LOT_SIZE)
-            except Exception:
-                pass
 
     total_charges = round(closed["charges"] + running_charges, 2)
 
