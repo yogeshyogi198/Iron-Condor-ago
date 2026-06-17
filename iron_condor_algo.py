@@ -473,6 +473,7 @@ SCALP_SUPERTREND_LENGTH = 10
 SCALP_SUPERTREND_MULTIPLIER = 3.0
 SCALP_TRAIL_BREAKEVEN_RR = 1.0        # trail to breakeven at 1:1 RR
 SCALP_TRAIL_INCREMENT_RR = 1.5        # further trail in 1:1.5 increments
+SCALP_SL_PERCENT = 0.10               # initial SL as fraction of entry premium
 
 # ---------------------------------------------------------------------------
 # Credit Spread params (trend-following with ADX + 200 EMA)
@@ -3312,8 +3313,8 @@ class Scalper3Min:
         tsym = opt["tsym"]
         qty = opt["lot_size"] * self.lots
         entry_prem = self._get_option_premium(tsym)
-        sl_price = entry_candle["low"] if is_ce else entry_candle["high"]
-        risk = abs(entry_prem - sl_price) if entry_prem > 0 else 0
+        sl_price = entry_prem * (1 - SCALP_SL_PERCENT) if is_ce else entry_prem * (1 + SCALP_SL_PERCENT)
+        risk = abs(entry_prem - sl_price)
 
         print(f"  {bold(green('ENTER'))} {self.symbol} {side} {tsym} x{qty} @ ₹{entry_prem:.2f} | SL ₹{sl_price:.2f}")
         try:
