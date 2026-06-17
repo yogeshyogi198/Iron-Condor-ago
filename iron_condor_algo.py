@@ -3981,10 +3981,12 @@ class ManualTradeManager:
             if oid:
                 fills = self.kite.get_fill_prices({tsym: oid})
                 exit_prem = fills.get(tsym, 0)
-        else:
+
+        if exit_prem == 0:
+            # Order failed or position was already manually closed —
+            # fetch actual exit fill from today's trades
             exit_reason = "MANUAL_CLOSE"
             print(f"  {tsym} already closed manually — fetching exit price")
-            # Try to get actual exit fill from today's trades
             try:
                 all_trades = self.kite.kite.trades()
                 for t in all_trades:
