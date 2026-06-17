@@ -485,6 +485,47 @@ PAGE = r"""<!DOCTYPE html>
   .btn-sm { padding:4px 10px; font-size:0.72rem; border-radius:6px; min-width:auto; }
 
   /* ── TABS ── */
+  /* ── SCALPER 3-COL GRID ── */
+  .sc-grid {
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:12px;
+    margin-top:12px;
+  }
+  .sc-col {
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    background:var(--log-bg);
+    border:1px solid var(--card-border);
+    border-radius:12px;
+    padding:12px;
+  }
+  .sc-col .mini-log {
+    max-height:80px;
+    min-height:50px;
+    font-size:0.7rem;
+  }
+  .sc-header {
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .sc-controls {
+    display:flex;
+    align-items:center;
+    gap:6px;
+    flex-wrap:wrap;
+  }
+  .sc-controls input[type="number"] {
+    width:46px; padding:3px 5px; border-radius:6px;
+    border:1px solid var(--card-border);
+    background:var(--bg); color:var(--text);
+    font-size:0.8rem; text-align:center; font-weight:600;
+  }
+  .sc-controls .btn { font-size:0.78rem; padding:6px 10px; flex:1; }
+
   .tab { display:none; }
   .tab.active { display:block; animation:fadeDown .3s ease; }
   .tab-bar { display:flex; gap:4px; margin-bottom:18px; background:var(--log-bg); border-radius:12px; padding:4px; }
@@ -554,6 +595,7 @@ PAGE = r"""<!DOCTYPE html>
     .sum-item { padding:10px; }
     .sum-value { font-size:1rem; }
     .strat-grid { grid-template-columns:1fr; gap:12px; }
+    .sc-grid { grid-template-columns:1fr; }
     .strat { padding:16px; border-radius:14px; }
     .strat .actions { gap:6px; flex-wrap:wrap; }
     .strat .actions .btn { flex:1; min-width:72px; padding:10px 12px; font-size:0.82rem; }
@@ -729,7 +771,7 @@ PAGE = r"""<!DOCTYPE html>
     </div>
     {% endfor %}
 
-    <!-- Scalper composite card — 3 indices in one -->
+    <!-- Scalper composite card — 3 indices side-by-side -->
     <div class="strat" id="strat-sc">
       <div class="strat-head">
         <div class="strat-meta">
@@ -738,23 +780,23 @@ PAGE = r"""<!DOCTYPE html>
         </div>
         <div class="strat-icon">&#9889;</div>
       </div>
-      <div style="display:flex;gap:10px;margin-top:10px;">
+      <div class="sc-grid">
       {% for sc_sid in ['sc_nifty','sc_bnf','sc_sensex'] %}
       {% set sc_label = {'sc_nifty':'NIFTY','sc_bnf':'BANKNIFTY','sc_sensex':'SENSEX'}[sc_sid] %}
       {% set sc_icon = {'sc_nifty':'&#9670;','sc_bnf':'&#9632;','sc_sensex':'&#9670;'}[sc_sid] %}
-      <div style="flex:1;background:var(--log-bg);border:1px solid var(--card-border);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;">
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-          <span style="font-size:1rem;">{{ sc_icon|safe }}</span>
-          <span style="font-weight:700;font-size:0.85rem;">{{ sc_label }}</span>
+      <div class="sc-col">
+        <div class="sc-header">
+          <span class="sc-icon">{{ sc_icon|safe }}</span>
+          <span class="sc-label">{{ sc_label }}</span>
           <span class="status-badge" id="sb-{{ sc_sid }}"><span class="pulse-dot" id="dot-{{ sc_sid }}" style="display:none;"></span><span id="s-{{ sc_sid }}">STOPPED</span></span>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <div class="sc-controls">
           <label style="font-size:0.75rem;color:var(--text-dim);">Lots:</label>
-          <input type="number" id="lots-input-{{ sc_sid }}" value="1" min="1" max="10" style="width:46px;padding:3px 5px;border-radius:6px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);font-size:0.8rem;text-align:center;font-weight:600;">
+          <input type="number" id="lots-input-{{ sc_sid }}" value="1" min="1" max="10">
           <button class="btn btn-primary" id="start-{{ sc_sid }}" onclick="action('{{ sc_sid }}','start')">&#9654; Start</button>
           <button class="btn btn-danger" id="stop-{{ sc_sid }}" onclick="action('{{ sc_sid }}','stop')" disabled>&#9632; Stop</button>
         </div>
-        <div class="mini-log" id="log-{{ sc_sid }}" style="max-height:100px;min-height:60px;font-size:0.7rem;"><div class="hl">Waiting...</div></div>
+        <div class="mini-log" id="log-{{ sc_sid }}"><div class="hl">Waiting...</div></div>
       </div>
       {% endfor %}
       </div>
@@ -885,6 +927,8 @@ async function fetchStatus(){
       if(s==='mt'){const scanBtn=$('scan-mt');if(scanBtn)scanBtn.style.display='inline-block';}
     }
     if(scRunning){count++;runningNames.push('SCALPER');}
+    const stratSc=$('strat-sc');
+    if(stratSc)stratSc.classList.toggle('is-running',scRunning);
     $('s-count').textContent=count+'/10';
     $('s-running-list').textContent=runningNames.length?runningNames.join(', '):'';
   }catch(e){}
