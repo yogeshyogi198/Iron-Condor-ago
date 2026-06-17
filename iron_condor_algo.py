@@ -1264,10 +1264,23 @@ class IronCondorManager:
                 prem = fill
             else:
                 prem = 0
+                try:
+                    all_trades = self.kite.kite.trades()
+                    reverse = "BUY" if leg.action == "SELL" else "SELL"
+                    for t in all_trades:
+                        if t.get("tradingsymbol") == leg.tradingsymbol and t.get("transaction_type") == reverse:
+                            prem = float(t.get("average_price", t.get("price", 0)))
+                            break
+                except Exception:
+                    pass
+                if prem == 0:
+                    try:
+                        prem = float(self.kite.kite.ltp(f"NFO:{leg.tradingsymbol}").get(f"NFO:{leg.tradingsymbol}", {}).get("last_price", 0))
+                    except Exception:
+                        pass
             current += prem if leg.action == "SELL" else -prem
         pnl = (self.entry_credit - current) * LOT_SIZE
         charges = calc_charges([asdict(l) for l in self.position.legs], LOT_SIZE)
-        # Recompute with actual entry fill prices if available
         if self._entry_fills:
             leg_dicts = []
             for leg in self.position.legs:
@@ -1592,9 +1605,22 @@ class CreditSpreadManager:
                 prem = fill
             else:
                 prem = 0
+                try:
+                    all_trades = self.kite.kite.trades()
+                    rev = "BUY" if leg.action == "SELL" else "SELL"
+                    for t in all_trades:
+                        if t.get("tradingsymbol") == leg.tradingsymbol and t.get("transaction_type") == rev:
+                            prem = float(t.get("average_price", t.get("price", 0)))
+                            break
+                except Exception:
+                    pass
+                if prem == 0:
+                    try:
+                        prem = float(self.kite.kite.ltp(f"NFO:{leg.tradingsymbol}").get(f"NFO:{leg.tradingsymbol}", {}).get("last_price", 0))
+                    except Exception:
+                        pass
             current += prem if leg.action == "SELL" else -prem
         pnl = (self.entry_credit - current) * LOT_SIZE
-        # Compute charges using actual entry fill prices if available
         leg_dicts = []
         for leg in self.position.legs:
             d = asdict(leg)
@@ -2349,6 +2375,21 @@ class SmaCrossoverBNF:
         if oid:
             fills = self.kite.get_fill_prices({tsym: oid})
             exit_prem = fills.get(tsym, 0)
+        if exit_prem == 0:
+            try:
+                all_trades = self.kite.kite.trades()
+                reverse = "BUY" if trade["side"] == "PE" else "SELL"
+                for t in all_trades:
+                    if t.get("tradingsymbol") == tsym and t.get("transaction_type") == reverse:
+                        exit_prem = float(t.get("average_price", t.get("price", 0)))
+                        break
+            except Exception:
+                pass
+            if exit_prem == 0:
+                try:
+                    exit_prem = float(self.kite.kite.ltp(f"{self.BNF_EXCHANGE}:{tsym}").get(f"{self.BNF_EXCHANGE}:{tsym}", {}).get("last_price", 0))
+                except Exception:
+                    pass
         entry_prem = trade.get("entry_prem", 0)
         pnl = (entry_prem - exit_prem) * qty if trade["side"] == "CE" else (exit_prem - entry_prem) * qty
         charges = calc_charges([{"action": "BUY", "premium": entry_prem}], qty, exchange=self.BNF_EXCHANGE)
@@ -3054,6 +3095,20 @@ class NiftySMAOptions:
                 prem = fill
             else:
                 prem = 0
+                try:
+                    all_trades = self.kite.kite.trades()
+                    reverse = "BUY" if leg["action"] == "SELL" else "SELL"
+                    for t in all_trades:
+                        if t.get("tradingsymbol") == leg["tsym"] and t.get("transaction_type") == reverse:
+                            prem = float(t.get("average_price", t.get("price", 0)))
+                            break
+                except Exception:
+                    pass
+                if prem == 0:
+                    try:
+                        prem = float(self.kite.kite.ltp(f"{N1H_EXCHANGE}:{leg['tsym']}").get(f"{N1H_EXCHANGE}:{leg['tsym']}", {}).get("last_price", 0))
+                    except Exception:
+                        pass
             if leg["action"] == "SELL":
                 current += leg["premium"] - prem
             else:
@@ -3355,12 +3410,21 @@ class Scalper3Min:
         qty = t["qty"]
         exchange = t.get("exchange", self.cfg["exchange"])
         exit_prem = self._get_option_premium(tsym)
-        pnl = (exit_prem - t["entry_price"]) * qty
-        print(f"  {bold(red('EXIT'))} ({reason}) {tsym} P&L ₹{pnl:+.2f}")
         try:
             self.kite.place_market(tsym, "SELL", qty, exchange=exchange)
         except Exception as e:
             print(f"  {red('✗ Exit')}: {e}")
+            # Order failed — try to get actual fill from trades
+            try:
+                all_trades = self.kite.kite.trades()
+                for t in all_trades:
+                    if t.get("tradingsymbol") == tsym and t.get("transaction_type") == "SELL":
+                        exit_prem = float(t.get("average_price", t.get("price", 0)))
+                        break
+            except Exception:
+                pass
+        pnl = (exit_prem - t["entry_price"]) * qty
+        print(f"  {bold(red('EXIT'))} ({reason}) {tsym} P&L ₹{pnl:+.2f}")
         charges = calc_charges([{"action": "BUY", "premium": t["entry_price"]}], qty, exchange=exchange)
         append_trade_log({
             "date": datetime.now().strftime("%Y-%m-%d"),
