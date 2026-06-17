@@ -28,6 +28,8 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
 
+BOT_SCRIPT = Path(__file__).parent / "iron_condor_algo.py"
+
 load_dotenv()
 
 _DASH_API_CALLS: list[float] = []
@@ -44,7 +46,7 @@ CONFIG_FILE = BOT_DIR / "kite_config.json"
 HEARTBEAT_FILE = BOT_DIR / ".bot_heartbeat.txt"
 TRADE_LOG = BOT_DIR / "trade_log.csv"
 
-STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sw", "sr", "ratio"]
+STRATEGIES = ["ic", "cs", "sma", "mt", "bnf", "n1h", "sc", "sw", "sr", "ratio"]
 LOT_SIZE = 65  # NIFTY lot size for charges estimation
 
 app = Flask(__name__)
@@ -95,6 +97,9 @@ def require_auth(f):
 bot_processes: dict[str, subprocess.Popen | None] = {s: None for s in STRATEGIES}
 bot_outputs: dict[str, list[str]] = {s: [] for s in STRATEGIES}
 bot_output_locks: dict[str, threading.Lock] = {s: threading.Lock() for s in STRATEGIES}
+sc_processes: dict[str, subprocess.Popen | None] = {}  # symbol -> process for sc
+sc_outputs: dict[str, list[str]] = {}
+sc_output_locks: dict[str, threading.Lock] = {}
 
 
 def load_config() -> dict:
@@ -118,6 +123,19 @@ def _reader_thread(strategy: str, proc: subprocess.Popen):
         pass
 
 
+def _sc_reader_thread(symbol: str, proc: subprocess.Popen):
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            lock = sc_output_locks.setdefault(symbol, threading.Lock())
+            with lock:
+                buf = sc_outputs.setdefault(symbol, [])
+                buf.append(line.rstrip())
+                if len(buf) > 200:
+                    sc_outputs[symbol] = buf[-200:]
+    except Exception:
+        pass
+
+
 STRATEGY_LABELS = {
     "ic": "Iron Condor (NIFTY)",
     "cs": "Credit Spread (NIFTY)",
@@ -127,6 +145,7 @@ STRATEGY_LABELS = {
     "sr": "Swing Rebalancer (Daily)",
     "bnf": "Bank Nifty 2H SMA(60)",
     "n1h": "Nifty 1H SMA Options",
+    "sc": "3-Min Scalper (NIFTY)",
     "ratio": "NIFTYBEES/GOLDBEES Ratio",
 }
 
@@ -260,7 +279,11 @@ PAGE = r"""<!DOCTYPE html>
     <div class="top-row">
       <div class="stat-box"><div class="label">Heartbeat</div><div class="value" id="s-heartbeat">---</div></div>
       <div class="stat-box"><div class="label">Token</div><div class="value" id="s-token">---</div></div>
-      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/8</div><div style="font-size:1rem;color:#8b949e;margin-top:4px;" id="s-running-list"></div></div>
+      <div class="stat-box"><div class="label">Running</div><div class="value blue" id="s-count">0/10</div><div style="font-size:1rem;color:#8b949e;margin-top:4px;" id="s-running-list"></div></div>
+      <div class="stat-box" style="border-color:#b71c1c;">
+        <div class="label" style="color:#f85149;">Kill Switch</div>
+        <button class="btn btn-danger" id="btn-kill" onclick="killSwitch()" style="font-size:1.2rem;padding:8px 18px;margin-top:6px;">&#9762; KILL ALL</button>
+      </div>
     </div>
   </div>
 
@@ -343,14 +366,19 @@ PAGE = r"""<!DOCTYPE html>
         <div class="value" style="font-size:1.3rem;" id="td-net">₹0</div>
         <div style="font-size:0.75rem;color:#8b949e;">after total charges</div>
       </div>
+      <div class="stat-box" style="min-width:0;padding:12px 16px;border-color:#f85149;">
+        <div class="label">MTM Limit</div>
+        <div class="value" style="font-size:1.3rem;" id="td-mtm">--</div>
+        <div style="font-size:0.75rem;color:#8b949e;">max daily loss guard</div>
+      </div>
     </div>
   </div>
 
   <!-- Strategy cards -->
    <div class="strategy-grid" id="strat-grid">
-    {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio'] %}
+     {% for sid in ['ic','cs','sma','mt','bnf','n1h','sc','sw','sr','ratio'] %}
     <div class="strat" id="strat-{{ sid }}">
-      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)','ratio':'NIFTYBEES/GOLDBEES Ratio'}[sid] }}</div>
+      <div class="name">{{ {'ic':'Iron Condor (NIFTY)','cs':'Credit Spread (NIFTY)','sma':'SMA Crossover (SENSEX)','mt':'Manual Trade (Trail SL)','bnf':'Bank Nifty 2H SMA(60)','n1h':'Nifty 1H SMA Options','sc':'3-Min Scalper (NIFTY)','sw':'Swing Scanner (Weekly)','sr':'Swing Rebalancer (Daily)','ratio':'NIFTYBEES/GOLDBEES Ratio'}[sid] }}</div>
       <div class="status"><span class="dot gray" id="dot-{{ sid }}"></span><span id="s-{{ sid }}">STOPPED</span> <span class="text-xs" id="resume-{{ sid }}" style="color:#d29922;display:none;">&#9888; Position saved</span></div>
       <div class="btn-row">
         {% if sid == 'mt' %}
@@ -363,6 +391,13 @@ PAGE = r"""<!DOCTYPE html>
       </div>
       <div class="lots-row" id="lots-{{ sid }}">
         {% if sid == 'mt' %}
+        {% elif sid == 'sc' %}
+        <label style="font-size:0.9rem;color:#8b949e;margin-right:8px;">Symbols:</label>
+        <label style="font-size:0.9rem;color:#c9d1d9;"><input type="checkbox" id="sc-sym-NIFTY" checked> NIFTY</label>
+        <label style="font-size:0.9rem;color:#c9d1d9;margin-left:8px;"><input type="checkbox" id="sc-sym-BANKNIFTY"> BANKNIFTY</label>
+        <label style="font-size:0.9rem;color:#c9d1d9;margin-left:8px;"><input type="checkbox" id="sc-sym-SENSEX"> SENSEX</label>
+        <span style="margin-left:12px;font-size:0.9rem;color:#8b949e;">Lots:</span>
+        <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10" style="width:50px;padding:4px 6px;border-radius:4px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:0.9rem;">
         {% else %}
         <label style="font-size:0.9rem;color:#8b949e;">Lots:</label>
         <input type="number" id="lots-input-{{ sid }}" value="1" min="1" max="10" style="width:60px;padding:6px 8px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:1rem;">
@@ -372,6 +407,13 @@ PAGE = r"""<!DOCTYPE html>
       <div id="mt-positions" style="display:none;margin-top:8px;"></div>
       {% endif %}
       <div class="mini-log" id="log-{{ sid }}"><div class="hl">Waiting...</div></div>
+      {% if sid == 'sc' %}
+      <div id="sc-sub-logs" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;">
+        <div class="mini-log" id="log-sc-NIFTY" style="display:none;font-size:0.9rem;max-height:180px;"><div class="hl">NIFTY: idle</div></div>
+        <div class="mini-log" id="log-sc-BANKNIFTY" style="display:none;font-size:0.9rem;max-height:180px;"><div class="hl">BANKNIFTY: idle</div></div>
+        <div class="mini-log" id="log-sc-SENSEX" style="display:none;font-size:0.9rem;max-height:180px;"><div class="hl">SENSEX: idle</div></div>
+      </div>
+      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -488,6 +530,13 @@ async function action(strategy, cmd) {
     var extra = '';
     var inp = document.getElementById('lots-input-' + strategy);
     if (inp) extra += '&lots=' + (parseInt(inp.value) || 1);
+    if (strategy === 'sc') {
+      ['NIFTY','BANKNIFTY','SENSEX'].forEach(sym => {
+        var cb = document.getElementById('sc-sym-' + sym);
+        if (cb && cb.checked) extra += '&sc_' + sym + '=1';
+      });
+    }
+    var sl_inp = document.getElementById('sl-input-' + strategy);
     var sl_inp = document.getElementById('sl-input-' + strategy);
     if (sl_inp) extra += '&sl=' + (parseInt(sl_inp.value) || 50);
     await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'strategy=' + strategy + '&resume=' + (cmd === 'resume' ? '1' : '0') + extra });
@@ -508,7 +557,7 @@ async function fetchStatus() {
     else { tk.textContent = '---'; tk.className = 'value'; }
     let count = 0;
     var runningNames = [];
-    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio']) {
+    for (const s of ['ic','cs','sma','mt','bnf','n1h','sc','sw','sr','ratio']) {
       const running = d.strategies && d.strategies[s];
       if (running) { count++; runningNames.push(s.toUpperCase()); }
       const dot = $('dot-' + s);
@@ -532,21 +581,54 @@ async function fetchStatus() {
         if (scanBtn) scanBtn.style.display = 'inline-block';
       }
     }
-    $('s-count').textContent = count + '/9';
+    $('s-count').textContent = count + '/10';
     $('s-running-list').textContent = runningNames.length ? runningNames.join(', ') : 'none';
   } catch(e) {}
 }
 setInterval(fetchStatus, 5000);
 fetchStatus();
 
+async function killSwitch() {
+  if (!confirm('⚠️ EMERGENCY KILL SWITCH\n\nThis will square off ALL open positions and halt ALL strategies. Continue?')) return;
+  const btn = document.getElementById('btn-kill');
+  btn.disabled = true;
+  btn.textContent = '⏳ KILLING...';
+  try {
+    const r = await fetch('/api/kill_switch', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      alert('✅ Kill switch executed.\n\n' + d.message);
+    } else {
+      alert('❌ Error: ' + (d.error || 'unknown'));
+    }
+  } catch(e) {
+    alert('❌ Request failed: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '☠ KILL ALL';
+  await fetchStatus();
+}
+
 async function fetchLogs() {
   try {
-    for (const s of ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio']) {
+    for (const s of ['ic','cs','sma','mt','bnf','n1h','sc','sw','sr','ratio']) {
       const d = await (await fetch('/api/log?strategy=' + s)).json();
       const box = $('log-' + s);
       if (d.output && d.output.length) {
         box.innerHTML = d.output.slice(-30).map(l => '<div>' + l.replace(/</g,'&lt;') + '</div>').join('');
         box.scrollTop = box.scrollHeight;
+      }
+    }
+    // Per-symbol SC logs
+    for (const sym of ['NIFTY','BANKNIFTY','SENSEX']) {
+      const d = await (await fetch('/api/log?strategy=sc&symbol=' + sym)).json();
+      const box = $('log-sc-' + sym);
+      if (d.output && d.output.length) {
+        box.style.display = '';
+        box.innerHTML = d.output.slice(-30).map(l => '<div>' + l.replace(/</g,'&lt;') + '</div>').join('');
+        box.scrollTop = box.scrollHeight;
+      } else {
+        box.style.display = 'none';
       }
     }
   } catch(e) {}
@@ -625,6 +707,18 @@ async function fetchTrades() {
     $('td-net').className = 'value';
     $('td-net').style.fontSize = '1.3rem';
     $('td-net').style.color = net >= 0 ? '#3fb950' : '#f85149';
+    // MTM limit display
+    var mtmEl = $('td-mtm');
+    if (d.mtm_total !== undefined) {
+      var mtmVal = d.mtm_total;
+      var mtmLimit = d.mtm_limit || 10000;
+      var mtmPct = (Math.abs(mtmVal) / mtmLimit * 100).toFixed(0);
+      mtmEl.textContent = '₹' + mtmVal.toLocaleString('en-IN', {minimumFractionDigits:2}) + ' / -₹' + mtmLimit.toLocaleString('en-IN');
+      mtmEl.style.color = mtmVal < -mtmLimit * 0.8 ? '#f85149' : (mtmVal < -mtmLimit * 0.5 ? '#d29922' : '#8b949e');
+      mtmEl.title = mtmPct + '% of daily loss limit used';
+    } else {
+      mtmEl.textContent = '--';
+    }
   } catch(e) {}
 }
 setInterval(fetchTrades, 10000);
@@ -729,12 +823,64 @@ def api_start():
     lots = request.form.get("lots", "1")
     if strategy not in STRATEGIES:
         return jsonify({"ok": False, "error": "Invalid strategy"}), 400
-    proc = bot_processes.get(strategy)
-    if proc and proc.poll() is None:
-        return jsonify({"ok": False, "error": f"{strategy.upper()} already running"}), 400
+    selected_symbols = []
+    if strategy == "sc":
+        for sym in ("NIFTY", "BANKNIFTY", "SENSEX"):
+            if request.form.get(f"sc_{sym}", "0") == "1":
+                selected_symbols.append(sym)
+        if not selected_symbols:
+            return jsonify({"ok": False, "error": "Select at least one symbol"}), 400
+        # Check if any sc subprocess is already running
+        for sym in selected_symbols:
+            proc = sc_processes.get(sym)
+            if proc and proc.poll() is None:
+                return jsonify({"ok": False, "error": f"SC {sym} already running"}), 400
+    else:
+        proc = bot_processes.get(strategy)
+        if proc and proc.poll() is None:
+            return jsonify({"ok": False, "error": f"{strategy.upper()} already running"}), 400
     if strategy in ("sw", "sr", "ratio"):
         scripts = {"sw": "swing_scanner.py", "sr": "swing_rebalancer.py", "ratio": "ratio_strategy.py"}
         cmd = [sys.executable, "-u", str(BOT_DIR / scripts[strategy])]
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(BOT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+        bot_processes[strategy] = proc
+        with bot_output_locks[strategy]:
+            bot_outputs[strategy] = []
+        t = threading.Thread(target=_reader_thread, args=(strategy, proc), daemon=True)
+        t.start()
+    elif strategy == "sc":
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        for sym in selected_symbols:
+            cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy=sc", f"--symbol={sym}"]
+            if lots and lots != "1":
+                cmd.append(f"--lots={lots}")
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(BOT_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env,
+            )
+            sc_processes[sym] = proc
+            sc_outputs[sym] = []
+            sc_output_locks[sym] = threading.Lock()
+            t = threading.Thread(target=_sc_reader_thread, args=(sym, proc), daemon=True)
+            t.start()
     else:
         cmd = [sys.executable, "-u", str(BOT_DIR / "iron_condor_algo.py"), f"--strategy={strategy}"]
         if resume:
@@ -744,23 +890,23 @@ def api_start():
         if strategy == "mt":
             sl = request.form.get("sl", "50")
             cmd.append(f"--sl={sl}")
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(BOT_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        env=env,
-    )
-    bot_processes[strategy] = proc
-    with bot_output_locks[strategy]:
-        bot_outputs[strategy] = []
-    t = threading.Thread(target=_reader_thread, args=(strategy, proc), daemon=True)
-    t.start()
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(BOT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+        bot_processes[strategy] = proc
+        with bot_output_locks[strategy]:
+            bot_outputs[strategy] = []
+        t = threading.Thread(target=_reader_thread, args=(strategy, proc), daemon=True)
+        t.start()
     return jsonify({"ok": True, "strategy": strategy})
 
 
@@ -770,6 +916,30 @@ def api_stop():
     strategy = request.form.get("strategy", "")
     if strategy not in STRATEGIES:
         return jsonify({"ok": False, "error": "Invalid strategy"}), 400
+    if strategy == "sc":
+        killed_any = False
+        for sym in list(sc_processes.keys()):
+            proc = sc_processes.get(sym)
+            if proc and proc.poll() is None:
+                if os.name == "nt":
+                    proc.terminate()
+                else:
+                    os.kill(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                sc_processes[sym] = None
+                killed_any = True
+        if not killed_any:
+            return jsonify({"ok": False, "error": "SC not running"}), 400
+        cfg = load_config()
+        pos_key = "scalper_trade"
+        if cfg.get(pos_key):
+            cfg.pop(pos_key, None)
+            save_config(cfg)
+        return jsonify({"ok": True, "strategy": strategy})
     proc = bot_processes.get(strategy)
     if not proc or proc.poll() is not None:
         return jsonify({"ok": False, "error": f"{strategy.upper()} not running"}), 400
@@ -784,11 +954,68 @@ def api_stop():
         proc.wait()
     bot_processes[strategy] = None
     cfg = load_config()
-    pos_key = {"ic": "position", "cs": "cs_position", "mt": "manual_trades"}.get(strategy)
+    pos_key = {"ic": "position", "cs": "cs_position", "sc": "scalper_trade", "mt": "manual_trades"}.get(strategy)
     if pos_key and cfg.get(pos_key):
         cfg.pop(pos_key, None)
         save_config(cfg)
     return jsonify({"ok": True, "strategy": strategy})
+
+
+@app.route("/api/kill_switch", methods=["POST"])
+@require_auth
+def api_kill_switch():
+    """Emergency kill switch — square off all positions and halt all strategies."""
+    # Phase 1: Kill all running bot subprocesses
+    killed = []
+    for s in STRATEGIES:
+        proc = bot_processes.get(s)
+        if proc and proc.poll() is None:
+            if os.name == "nt":
+                proc.terminate()
+            else:
+                os.kill(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            bot_processes[s] = None
+            killed.append(s)
+    # Kill SC subprocesses
+    for sym in list(sc_processes.keys()):
+        proc = sc_processes.get(sym)
+        if proc and proc.poll() is None:
+            if os.name == "nt":
+                proc.terminate()
+            else:
+                os.kill(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            sc_processes[sym] = None
+            killed.append(f"sc_{sym}")
+    # Phase 2: Launch the kill switch subprocess to square off positions
+    try:
+        kill_proc = subprocess.Popen(
+            [sys.executable, "-u", str(BOT_SCRIPT), "--kill"],
+            cwd=str(BOT_DIR),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace",
+        )
+        kill_proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        kill_proc.kill()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Kill switch execution error: {e}"}), 500
+    # Phase 3: Clear saved position configs
+    cfg = load_config()
+    for key in ("position", "cs_position", "scalper_trade", "manual_trades"):
+        cfg.pop(key, None)
+    save_config(cfg)
+    msg = f"Emergency kill switch executed. Killed strategies: {', '.join(killed) if killed else 'none'}"
+    return jsonify({"ok": True, "message": msg, "killed": killed})
 
 
 @app.route("/api/mt-scan", methods=["POST"])
@@ -817,7 +1044,7 @@ def api_mt_scan():
             positions.append(p)
 
     tracked_tsyms = set()
-    for key in ("position", "cs_position"):
+    for key in ("position", "cs_position", "scalper_trade"):
         saved = cfg.get(key)
         if saved and "legs" in saved:
             for leg in saved["legs"]:
@@ -962,8 +1189,11 @@ def api_mt_add():
 def api_status():
     running = {}
     for s in STRATEGIES:
-        proc = bot_processes.get(s)
-        running[s] = proc is not None and proc.poll() is None
+        if s == "sc":
+            running[s] = any(p and p.poll() is None for p in sc_processes.values())
+        else:
+            proc = bot_processes.get(s)
+            running[s] = proc is not None and proc.poll() is None
     heartbeat = ""
     if HEARTBEAT_FILE.exists():
         heartbeat = HEARTBEAT_FILE.read_text().strip()
@@ -987,6 +1217,9 @@ def api_status():
         p = cfg["cs_position"]
         legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
         positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
+    if cfg.get("scalper_trade"):
+        p = cfg["scalper_trade"]
+        positions["sc"] = {"expiry": p.get("expiry", ""), "entry_credit": p.get("entry_price", 0), "legs": [f"BUY {p.get('tsym','')} SL @ {p.get('sl',0)}"]}
     if cfg.get("manual_trades"):
         trades = cfg["manual_trades"]
         if isinstance(trades, dict):
@@ -1006,6 +1239,12 @@ def api_status():
 @require_auth
 def api_log():
     strategy = request.args.get("strategy", "ic")
+    if strategy == "sc":
+        symbol = request.args.get("symbol", "NIFTY")
+        lock = sc_output_locks.get(symbol, threading.Lock())
+        with lock:
+            out = list(sc_outputs.get(symbol, []))
+        return jsonify({"output": out[-100:]})
     if strategy not in STRATEGIES:
         strategy = "ic"
     with bot_output_locks[strategy]:
@@ -1241,6 +1480,10 @@ def api_trades():
 
     total_charges = round(closed["charges"] + running_charges, 2)
 
+    # Compute total MTM (closed + live) for dashboard display
+    mtm_total = round(closed["pnl"] + (live_pnl or 0), 2)
+    mtm_limit = 10000.0
+
     return jsonify({
         "date": today,
         "closed_trades": closed["total"],
@@ -1253,6 +1496,8 @@ def api_trades():
         "running_details": running_details,
         "live_pnl": round(live_pnl, 2) if live_pnl is not None else None,
         "live_positions": live_positions,
+        "mtm_total": mtm_total,
+        "mtm_limit": mtm_limit,
     })
 
 

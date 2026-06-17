@@ -22,6 +22,7 @@ from pathlib import Path
 import socket
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, time as dtime
 from typing import Optional
@@ -51,9 +52,124 @@ def cyan(s: str) -> str:
 
 import random
 import requests
+import numpy as np
 from kiteconnect import KiteConnect
 
 import telegram_logger
+
+# ── Centralized Notification Engine ────────────────────────
+
+STRATEGY_NAMES = {
+    "ic": "Iron Condor (NIFTY)", "cs": "Credit Spread (NIFTY)",
+    "sma": "SMA Crossover (SENSEX)", "mt": "Manual Trade (Trail SL)",
+    "bnf": "Bank Nifty 2H SMA(60)", "n1h": "Nifty 1H SMA Options",
+    "sw": "Swing Scanner (Weekly)", "sr": "Swing Rebalancer (Daily)",
+    "ratio": "NIFTYBEES/GOLDBEES Ratio",
+}
+
+class Notifier:
+    """Centralized Telegram notification engine.
+
+    Usage:
+        notifier = Notifier(strategy_key="ic", lots=1)
+
+        # Scenario 1
+        notifier.bot_started()
+        notifier.bot_crashed(e)
+
+        # Scenario 2 — after entry with fill prices
+        notifier.entry(tradingsymbol="NIFTY23JUN23000CE",
+                       action="SELL", fill_price=22.5, qty=65, sl=18.0)
+
+        # Scenario 3
+        notifier.trail_updated(new_sl=42.0, current_ltp=45.0)
+
+        # Scenario 4 — after exit with fill prices
+        notifier.position_closed(reason="TARGET", gross_pnl=850.0,
+                                 charges=145.3, net_pnl=704.7)
+
+        # Scenario 5 — periodic, no strategy context needed
+        Notifier.hourly_report(active_bots=3, closed_pnl=1250.0,
+                               live_mtm=-200.0, total_charges=312.0)
+    """
+
+    def __init__(self, strategy_key: str = "", lots: int = 1):
+        self.name = STRATEGY_NAMES.get(strategy_key, strategy_key.upper() if strategy_key else "Unknown")
+        self.lots = lots
+
+    # ── 1. BOT START & CRASH ────────────────────────────────
+
+    def bot_started(self):
+        telegram_logger.send_telegram(
+            f"🚀 Bot Started! | Strategy: {self.name} | Lots: {self.lots}",
+            level="INFO")
+
+    def bot_crashed(self, error: Exception):
+        tb = traceback.format_exc()
+        telegram_logger.send_telegram(
+            f"⚠️ CRITICAL ERROR | Strategy: {self.name}\n"
+            f"Error Type: {type(error).__name__}\n"
+            f"Details: {tb}",
+            level="CRITICAL")
+
+    @staticmethod
+    def crash_alert(strategy_key: str, error: Exception):
+        name = STRATEGY_NAMES.get(strategy_key, strategy_key.upper())
+        tb = traceback.format_exc()
+        telegram_logger.send_telegram(
+            f"⚠️ CRITICAL ERROR | Strategy: {name}\n"
+            f"Error Type: {type(error).__name__}\n"
+            f"Details: {tb}",
+            level="CRITICAL")
+
+    # ── 2. ENTRY ────────────────────────────────────────────
+
+    def entry(self, tradingsymbol: str = "", action: str = "BUY",
+              fill_price: float = 0.0, qty: int = 0, sl: float = 0.0):
+        telegram_logger.send_telegram(
+            f"📥 ENTRY SIGNAL | Strategy: {self.name}\n"
+            f"Action: {action.upper()} | Instrument: {tradingsymbol}\n"
+            f"Avg Price: ₹{fill_price:.2f} | Qty: {qty}\n"
+            f"Initial SL: ₹{sl:.2f}",
+            level="TRADE")
+
+    # ── 3. TRAILING SL ──────────────────────────────────────
+
+    def trail_updated(self, new_sl: float, current_ltp: float):
+        telegram_logger.send_telegram(
+            f"🔄 TRAILING SL UPDATED | Strategy: {self.name}\n"
+            f"New SL Locked at: ₹{new_sl:.2f}\n"
+            f"Current LTP: ₹{current_ltp:.2f}",
+            level="INFO")
+
+    # ── 4. EXIT & P&L ───────────────────────────────────────
+
+    def position_closed(self, reason: str = "", gross_pnl: float = 0.0,
+                        charges: float = 0.0, net_pnl: float = 0.0):
+        icon = "✅" if net_pnl >= 0 else "❌"
+        telegram_logger.send_telegram(
+            f"{icon} POSITION CLOSED | Strategy: {self.name}\n"
+            f"Exit Reason: {reason}\n"
+            f"Gross P&L: ₹{gross_pnl:+.2f}\n"
+            f"Actual Charges: ₹{charges:.2f}\n"
+            f"Net P&L: ₹{net_pnl:+.2f}",
+            level="PROFIT" if net_pnl >= 0 else "LOSS")
+
+    # ── 5. HOURLY REPORT ────────────────────────────────────
+
+    @staticmethod
+    def hourly_report(active_bots: int = 0, closed_pnl: float = 0.0,
+                      live_mtm: float = 0.0, total_charges: float = 0.0):
+        net = closed_pnl + live_mtm - total_charges
+        icon = "✅" if net >= 0 else "❌"
+        telegram_logger.send_telegram(
+            f"📊 HOURLY REPORT\n"
+            f"Active Bots: {active_bots}\n"
+            f"Total Closed P&L: ₹{closed_pnl:+.2f}\n"
+            f"Live Floating MTM: ₹{live_mtm:+.2f}\n"
+            f"Total Charges: ₹{total_charges:.2f}\n"
+            f"{icon} Net Real-time P&L: ₹{net:+.2f}",
+            level="INFO")
 
 class _NullLogger:
     def debug(self, *a, **kw): pass
@@ -63,6 +179,19 @@ class _NullLogger:
     def critical(self, *a, **kw): pass
 
 log: logging.Logger = _NullLogger()  # set up properly in main()
+
+# ── IST timezone ──────────────────────────────
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    from pytz import timezone
+    IST = timezone("Asia/Kolkata")
+
+# ── Global risk management flags ──────────────
+SYSTEM_HALTED = False
+GLOBAL_MAX_DAILY_LOSS = 10000.0   # ₹10,000 max cumulative loss per session
+GLOBAL_HALT_DATE = ""              # date (IST) on which system was halted
 
 # ── API resilience: rate limiter + retry ──────
 _API_CALL_TIMES: list[float] = []
@@ -177,32 +306,9 @@ def periodic_connection_test(kite: "KiteSession", exchange: str = "NFO"):
         return
     _last_test_time = now
     try:
-        instruments = kite.get_option_instruments()
-        if not instruments:
-            return
-        tsym = instruments[0]["tradingsymbol"]
-        market_open = is_market_open()
-        if market_open:
-            qty, price, otype = 9999, 0, "MARKET"
-            variety = "regular"
-        else:
-            qty, price, otype = LOT_SIZE, 0.05, "LIMIT"
-            variety = "amo"
-        api_retry(
-            kite.kite.place_order, variety, exchange=exchange,
-            tradingsymbol=tsym, transaction_type="BUY", quantity=qty,
-            price=price, product="NRML", order_type=otype, validity="DAY",
-        )
-        if not market_open:
-            print(f"  Test AMO BUY {tsym} x {qty} @ ₹{price} — visible in Zerodha terminal")
-    except Exception as e:
-        msg = str(e).lower()
-        if "margin" in msg or "funds" in msg or "insufficient" in msg:
-            pass
-        elif "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
-            log.warning(f"IP REJECTED during periodic test on {exchange}: {e}")
-        else:
-            pass
+        kite.kite.profile()
+    except Exception:
+        pass
 
 def reload_token_if_needed(kite: "KiteSession") -> bool:
     """Reload token from config if it changed (user ran --login in another terminal)."""
@@ -337,7 +443,7 @@ SELL_PREMIUM_MIN = 20.0            # Short strike premium range: ₹20–25
 SELL_PREMIUM_MAX = 25.0
 BUY_PREMIUM_MIN = 4.0              # Long strike premium range: ₹4–6
 BUY_PREMIUM_MAX = 6.0
-ZERO_DTE_SELL_TARGET = 2.0         # 0DTE: exit when short premium ≤ ₹2
+ZERO_DTE_SELL_TARGET = 0.05         # 0DTE: exit when short premium ≤ ₹0.05
 PROFIT_TARGET_RS = 1000.0        # Book profit at ₹1000
 SL_MULTIPLIER = 1.0              # SL when loss = net_credit × 1
 
@@ -356,6 +462,19 @@ SENSEX_NAME = "SENSEX"           # name column in BFO instrument CSV
 SENSEX_STRIKE_GAP = 100          # SENSEX has 100-point strike intervals
 
 # ---------------------------------------------------------------------------
+# 3-Min Scalper params (ADX + Supertrend)
+# ---------------------------------------------------------------------------
+
+SCALP_TIMEFRAME = "3minute"
+SCALP_ADX_LENGTH = 14
+SCALP_ADX_TRIGGER = 20
+SCALP_ADX_PROXIMITY = 19.99           # trigger pre-trade checks when ADX >= this
+SCALP_SUPERTREND_LENGTH = 10
+SCALP_SUPERTREND_MULTIPLIER = 3.0
+SCALP_TRAIL_BREAKEVEN_RR = 1.0        # trail to breakeven at 1:1 RR
+SCALP_TRAIL_INCREMENT_RR = 1.5        # further trail in 1:1.5 increments
+
+# ---------------------------------------------------------------------------
 # Credit Spread params (trend-following with ADX + 200 EMA)
 # ---------------------------------------------------------------------------
 
@@ -365,7 +484,7 @@ CS_BUY_PREMIUM_MIN = 5.0
 CS_BUY_PREMIUM_MAX = 10.0
 CS_PROFIT_TARGET_RS = 1000.0
 CS_SL_MULTIPLIER = 1.0
-CS_ZERO_DTE_SELL_TARGET = 2.0
+CS_ZERO_DTE_SELL_TARGET = 0.05
 CS_ADX_PERIOD = 14
 CS_EMA_PERIOD = 200
 CS_TIMEFRAME = "15minute"
@@ -536,14 +655,16 @@ class KiteSession:
         """Return {tradingsymbol: average_fill_price} for market orders.
         orders_map: {tradingsymbol: order_id}. Retries briefly for fills."""
         import time
+        fills = {}
         for _ in range(15):
             try:
                 all_orders = api_retry(self.kite.orders)
                 if not all_orders:
                     time.sleep(0.3)
                     continue
-                fills = {}
                 for tsym, oid in orders_map.items():
+                    if tsym in fills:
+                        continue
                     for o in all_orders:
                         if o.get("order_id") == oid and o.get("status") == "COMPLETE":
                             avg = o.get("average_price")
@@ -679,6 +800,59 @@ def calc_adx(candles: list[dict], period: int) -> dict | None:
     minus_di = 100 * sum(minus_dm[s]) / tr_sum
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
     return {"adx": dx, "plus_di": plus_di, "minus_di": minus_di}
+
+
+# ---------------------------------------------------------------------------
+# Supertrend indicator
+# ---------------------------------------------------------------------------
+
+def calc_supertrend(candles: list[dict], length: int = 10, multiplier: float = 3.0) -> dict | None:
+    """Calculate Supertrend from candle list (must have high, low, close).
+    Returns {'supertrend': float, 'direction': int} where direction=1 (up) or -1 (down)."""
+    if len(candles) < length + 1:
+        return None
+    high = np.array([c["high"] for c in candles], dtype=float)
+    low = np.array([c["low"] for c in candles], dtype=float)
+    close = np.array([c["close"] for c in candles], dtype=float)
+
+    # True Range
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+
+    # ATR (RMA: smoothed Wilder's)
+    atr = np.full_like(tr, np.nan)
+    atr[length - 1] = np.mean(tr[:length])
+    for i in range(length, len(tr)):
+        atr[i] = (atr[i - 1] * (length - 1) + tr[i]) / length
+
+    hl_avg = (high + low) / 2.0
+    upper = hl_avg + multiplier * atr
+    lower = hl_avg - multiplier * atr
+
+    supertrend = np.full_like(close, np.nan)
+    direction = np.full_like(close, 0, dtype=int)
+
+    for i in range(length, len(close)):
+        if np.isnan(supertrend[i - 1]):
+            supertrend[i] = lower[i] if close[i] > lower[i] else upper[i]
+            direction[i] = 1 if close[i] > lower[i] else -1
+        else:
+            prev_dir = direction[i - 1]
+            if prev_dir == 1:
+                new_dir = -1 if close[i] <= upper[i] else 1
+                supertrend[i] = upper[i] if new_dir == -1 else lower[i]
+            else:
+                new_dir = 1 if close[i] >= lower[i] else -1
+                supertrend[i] = lower[i] if new_dir == 1 else upper[i]
+            direction[i] = new_dir
+
+    return {
+        "supertrend": float(supertrend[-1]),
+        "direction": int(direction[-1]),
+        "prev_supertrend": float(supertrend[-2]) if len(supertrend) > 1 else float(supertrend[-1]),
+        "prev_direction": int(direction[-2]) if len(direction) > 1 else int(direction[-1]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +1009,9 @@ class IronCondorManager:
         ]
 
         net_credit = (sp_prem + sc_prem) - (lp_prem + lc_prem)
-        width = float(lc_row["strike"]) - float(sc_row["strike"])
+        call_width = float(lc_row["strike"]) - float(sc_row["strike"])
+        put_width = float(sp_row["strike"]) - float(lp_row["strike"])
+        width = max(call_width, put_width)
 
         return IronCondor(
             spot=spot, expiry=expiry, legs=legs,
@@ -882,7 +1058,8 @@ class IronCondorManager:
             return False
         return len(expected) == 0
 
-    def _square_off_legs(self, legs: list[IronCondorLeg], order_ids: dict[str, str] = {}):
+    def _square_off_legs(self, legs: list[IronCondorLeg], order_ids: dict[str, str] | None = None):
+        order_ids = order_ids or {}
         """Square off filled legs using market orders."""
         filled = set()
         try:
@@ -1046,8 +1223,11 @@ class IronCondorManager:
         if exit_now:
             return "EXIT_REQUESTED"
 
-        # Time exit: close at 3:15 PM regardless
-        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+        # Time exit: non-0DTE at 3:15 PM, 0DTE at 3:25 PM
+        if is_0dte:
+            if now.hour > 15 or (now.hour == 15 and now.minute >= 25):
+                return "EXIT_TIME"
+        elif now.hour > 15 or (now.hour == 15 and now.minute >= 15):
             return "EXIT_TIME"
 
         # Normal day: profit target
@@ -1177,9 +1357,7 @@ class CreditSpreadManager:
             try:
                 for row in self.kite.kite.instruments(exchange):
                     tsym = row.get("tradingsymbol", "")
-                    if tsym in ("NIFTY 50", "NIFTY"):
-                        return int(row["instrument_token"])
-                    if "NIFTY" in tsym and row.get("instrument_type", "") == "":
+                    if tsym == "NIFTY 50":
                         return int(row["instrument_token"])
             except Exception:
                 continue
@@ -1280,7 +1458,10 @@ class CreditSpreadManager:
         sell_legs = [l for l in cs.legs if l.action == "SELL"]
         for leg in buy_legs:
             try:
-                oid = self.kite.place_market(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
+                if is_market_open():
+                    oid = self.kite.place_market(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
+                else:
+                    oid = self.kite.place_limit(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
                 order_ids[leg.tradingsymbol] = oid
             except Exception as e:
                 log.warning(f"  BUY fail: {e}")
@@ -1302,7 +1483,10 @@ class CreditSpreadManager:
         log.info("Phase 2 — Premium (SELL)...")
         for leg in sell_legs:
             try:
-                oid = self.kite.place_market(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
+                if is_market_open():
+                    oid = self.kite.place_market(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
+                else:
+                    oid = self.kite.place_limit(leg.tradingsymbol, leg.action, LOT_SIZE, leg.premium)
                 order_ids[leg.tradingsymbol] = oid
             except Exception as e:
                 log.warning(f"  SELL fail: {e}")
@@ -1328,7 +1512,8 @@ class CreditSpreadManager:
         telegram_logger.strategy_entry_alert(f"CS {cs.spread_type}", legs_dict)
         return True
 
-    def _square_off(self, legs: list[CreditSpreadLeg], order_ids: dict = {}):
+    def _square_off(self, legs: list[CreditSpreadLeg], order_ids: dict | None = None):
+        order_ids = order_ids or {}
         filled = set()
         try:
             for o in self.kite.kite.orders():
@@ -1373,7 +1558,10 @@ class CreditSpreadManager:
         print(f"Short Prem: ₹{avg_sp:.1f}  P&L: ₹{pnl:.0f}")
         if exit_now:
             return "EXIT_REQUESTED"
-        if datetime.now().hour > 15 or (datetime.now().hour == 15 and datetime.now().minute >= 15):
+        if is_0dte:
+            if datetime.now().hour > 15 or (datetime.now().hour == 15 and datetime.now().minute >= 25):
+                return "EXIT_TIME"
+        elif datetime.now().hour > 15 or (datetime.now().hour == 15 and datetime.now().minute >= 15):
             return "EXIT_TIME"
         if not is_0dte and pnl >= CS_PROFIT_TARGET_RS:
             return "EXIT_PROFIT"
@@ -1451,7 +1639,7 @@ class CreditSpreadManager:
             qty = p.get("quantity", 0)
             legs.append(CreditSpreadLeg(tsym, float(p.get("strike_price", 0)),
                                         p.get("instrument_type", ""),
-                                        "SELL" if abs(qty) == LOT_SIZE else "BUY", 0))
+                                        "SELL" if qty < 0 else "BUY", 0))
         exp = list({p.get("expiry_date", "")[:10] for p in nifty})[0]
         quotes = self.kite.get_quotes([l.tradingsymbol for l in legs])
         net = 0.0
@@ -1693,6 +1881,9 @@ class SmaCrossover:
             elapsed = (now - start).total_seconds() / 60
             if elapsed > timeout_minutes:
                 return False
+            if SYSTEM_HALTED:
+                log.warning("SMA SENSEX crossover watch aborted — system halted.")
+                return False
 
             if session_name == "S1" and not self._in_session1(now):
                 return False
@@ -1740,12 +1931,20 @@ class SmaCrossover:
             if near_ce and self._proximity_tested != "CE":
                 log.debug(f"PROXIMITY CE: price within {pct_dist:.3f}% of SMA — running pre-trade IP check")
                 periodic_connection_test(self.kite, SENSEX_EXCHANGE)
-                check_ip_whitelist(self.kite)
+                ip_ok = check_ip_whitelist(self.kite)
+                if ip_ok is True:
+                    telegram_logger.send_telegram("SMA CE proximity — IP whitelisted ✓", level="INFO")
+                elif ip_ok is False:
+                    telegram_logger.send_telegram("SMA CE proximity — IP NOT whitelisted ⚠️", level="WARNING")
                 self._proximity_tested = "CE"
             elif near_pe and self._proximity_tested != "PE":
                 log.debug(f"PROXIMITY PE: price within {pct_dist:.3f}% of SMA — running pre-trade IP check")
                 periodic_connection_test(self.kite, SENSEX_EXCHANGE)
-                check_ip_whitelist(self.kite)
+                ip_ok = check_ip_whitelist(self.kite)
+                if ip_ok is True:
+                    telegram_logger.send_telegram("SMA PE proximity — IP whitelisted ✓", level="INFO")
+                elif ip_ok is False:
+                    telegram_logger.send_telegram("SMA PE proximity — IP NOT whitelisted ⚠️", level="WARNING")
                 self._proximity_tested = "PE"
 
             # ── Actual crossover execution ──
@@ -1768,6 +1967,9 @@ class SmaCrossover:
             time.sleep(5)
 
     def _enter_trade(self, opt: dict, side: str, entry_candle: dict) -> bool:
+        if SYSTEM_HALTED:
+            log.warning("SMA SENSEX entry blocked — system halted.")
+            return False
         side_str = "BUY"
         entry_price = self._get_sensex_spot()
         if entry_price is None:
@@ -1875,6 +2077,9 @@ class SmaCrossover:
             pass
 
         while True:
+            if SYSTEM_HALTED:
+                log.warning("SMA SENSEX — system halted by global MTM limit.")
+                return
             monitor_ip_status(self.kite)
             periodic_connection_test(self.kite, SENSEX_EXCHANGE)
             now = datetime.now()
@@ -1911,6 +2116,15 @@ class SmaCrossover:
 
             # Cleanup dead trades (position closed externally)
             self.trades = [t for t in self.trades if self._trade_has_position(t)]
+
+            # Periodic global MTM check (every ~10 iterations)
+            if getattr(self, '_mtm_loop_count', 0) % 10 == 0:
+                if check_global_mtm(self.kite):
+                    log.warning("SMA SENSEX — global MTM limit breached, squaring off trades.")
+                    for trade in list(self.trades):
+                        self._exit_trade(trade)
+                    return
+            self._mtm_loop_count = getattr(self, '_mtm_loop_count', 0) + 1
 
             # If any trade still active, fast loop
             if self.trades:
@@ -2160,6 +2374,9 @@ class SmaCrossoverBNF:
             self.trades.remove(trade)
 
     def _enter_trade(self, opt: dict, side: str, entry_candle: dict) -> bool:
+        if SYSTEM_HALTED:
+            log.warning("BNF SMA entry blocked — system halted.")
+            return False
         side_str = "BUY"
         entry_price = self._get_bnf_spot()
         if entry_price is None:
@@ -2310,12 +2527,20 @@ class SmaCrossoverBNF:
         if near_ce and self._proximity_tested != "CE":
             log.debug(f"BNF PROXIMITY CE: {pct_dist:.3f}% from SMA — pre-trade IP check")
             periodic_connection_test(self.kite, self.BNF_EXCHANGE)
-            check_ip_whitelist(self.kite)
+            ip_ok = check_ip_whitelist(self.kite)
+            if ip_ok is True:
+                telegram_logger.send_telegram("BNF SMA CE proximity — IP whitelisted ✓", level="INFO")
+            elif ip_ok is False:
+                telegram_logger.send_telegram("BNF SMA CE proximity — IP NOT whitelisted ⚠️", level="WARNING")
             self._proximity_tested = "CE"
         elif near_pe and self._proximity_tested != "PE":
             log.debug(f"BNF PROXIMITY PE: {pct_dist:.3f}% from SMA — pre-trade IP check")
             periodic_connection_test(self.kite, self.BNF_EXCHANGE)
-            check_ip_whitelist(self.kite)
+            ip_ok = check_ip_whitelist(self.kite)
+            if ip_ok is True:
+                telegram_logger.send_telegram("BNF SMA PE proximity — IP whitelisted ✓", level="INFO")
+            elif ip_ok is False:
+                telegram_logger.send_telegram("BNF SMA PE proximity — IP NOT whitelisted ⚠️", level="WARNING")
             self._proximity_tested = "PE"
 
         side = None
@@ -2335,7 +2560,18 @@ class SmaCrossoverBNF:
         last_candle_count = 0
         last_cross = None
 
+        _bnf_mtm_count = 0
         while True:
+            if SYSTEM_HALTED:
+                log.warning("BNF SMA — system halted by global MTM limit.")
+                return
+            if _bnf_mtm_count % 10 == 0:
+                if check_global_mtm(self.kite):
+                    log.warning("BNF SMA — global MTM limit breached, squaring off trades.")
+                    for trade in list(self.trades):
+                        self._exit_trade(trade)
+                    return
+            _bnf_mtm_count += 1
             monitor_ip_status(self.kite)
             periodic_connection_test(self.kite, self.BNF_EXCHANGE)
             now = datetime.now()
@@ -2491,12 +2727,20 @@ class NiftySMAOptions:
         if near_ce and self._proximity_tested != "CE":
             log.debug(f"N1H PROXIMITY CE: {pct_dist:.3f}% from SMA — pre-trade IP check")
             periodic_connection_test(self.kite, N1H_EXCHANGE)
-            check_ip_whitelist(self.kite)
+            ip_ok = check_ip_whitelist(self.kite)
+            if ip_ok is True:
+                telegram_logger.send_telegram("N1H CE proximity — IP whitelisted ✓", level="INFO")
+            elif ip_ok is False:
+                telegram_logger.send_telegram("N1H CE proximity — IP NOT whitelisted ⚠️", level="WARNING")
             self._proximity_tested = "CE"
         elif near_pe and self._proximity_tested != "PE":
             log.debug(f"N1H PROXIMITY PE: {pct_dist:.3f}% from SMA — pre-trade IP check")
             periodic_connection_test(self.kite, N1H_EXCHANGE)
-            check_ip_whitelist(self.kite)
+            ip_ok = check_ip_whitelist(self.kite)
+            if ip_ok is True:
+                telegram_logger.send_telegram("N1H PE proximity — IP whitelisted ✓", level="INFO")
+            elif ip_ok is False:
+                telegram_logger.send_telegram("N1H PE proximity — IP NOT whitelisted ⚠️", level="WARNING")
             self._proximity_tested = "PE"
 
         if above and not prev_above:
@@ -2689,8 +2933,19 @@ class NiftySMAOptions:
         """Main loop: watch for crossover → enter → monitor → adjust → exit."""
         print(f"{bold(cyan('NIFTY 1H SMA60 Options Strategy'))}")
         last_candle_count = 0
+        _n1h_mtm_count = 0
 
         while True:
+            if SYSTEM_HALTED:
+                log.warning("N1H — system halted by global MTM limit.")
+                return
+            if _n1h_mtm_count % 10 == 0:
+                if check_global_mtm(self.kite):
+                    log.warning("N1H — global MTM limit breached, exiting position.")
+                    if self.position:
+                        self._exit("GLOBAL_MTM_HALT", self._current_pnl())
+                    return
+            _n1h_mtm_count += 1
             monitor_ip_status(self.kite)
             periodic_connection_test(self.kite, N1H_EXCHANGE)
             now = datetime.now()
@@ -2698,6 +2953,10 @@ class NiftySMAOptions:
 
             # ── ENTRY PHASE ──
             if self.position is None:
+                if SYSTEM_HALTED:
+                    log.warning("N1H entry blocked — system halted.")
+                    time.sleep(30)
+                    continue
                 if not is_market_open():
                     next_open = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
                     if now.weekday() >= 4:
@@ -2827,6 +3086,390 @@ class NiftySMAOptions:
 
 
 # ---------------------------------------------------------------------------
+# 3-Min Scalper Strategy (ADX + Supertrend)
+# ---------------------------------------------------------------------------
+
+SCALPER_CONFIG_KEY = "scalper_trade"
+
+SCALP_SYMBOLS = {
+    "NIFTY": {
+        "exchange": "NFO", "name": "NIFTY", "index_token_symbol": "NIFTY 50",
+        "strike_gap": 50, "spot_symbol": "NSE:NIFTY 50", "label": "NIFTY",
+        "index_exchanges": ("NSE", "BSE"),
+    },
+    "BANKNIFTY": {
+        "exchange": "NFO", "name": "BANKNIFTY", "index_token_symbol": "NIFTY BANK",
+        "strike_gap": 100, "spot_symbol": "NSE:NIFTY BANK", "label": "BANK NIFTY",
+        "index_exchanges": ("NSE", "BSE"),
+    },
+    "SENSEX": {
+        "exchange": "BFO", "name": "SENSEX", "index_token_symbol": "SENSEX",
+        "strike_gap": 100, "spot_symbol": "BSE:SENSEX", "label": "SENSEX",
+        "index_exchanges": ("BSE", "NSE"),
+    },
+}
+
+class Scalper3Min:
+    """3-min scalping using ADX(14) trigger + Supertrend(10, 3.0) filter.
+
+    Entry (on bar close):
+      - ADX crosses above 20 AND close > Supertrend → BUY ATM CE
+      - ADX crosses above 20 AND close < Supertrend → BUY ATM PE
+
+    SL & Trail:
+      - CE: initial SL = entry candle low
+      - PE: initial SL = entry candle high
+      - 1:1 RR → trail to breakeven
+      - 1:1.5 RR increments → trail further
+
+    Pre-trade: when ADX >= 19.99 run health checks.
+
+    Supports symbols: NIFTY, BANKNIFTY, SENSEX (set via `symbol` param).
+    """
+
+    def __init__(self, kite: KiteSession, symbol: str = "NIFTY", lots: int = 1):
+        self.kite = kite
+        self.lots = lots
+        self.symbol = symbol.upper()
+        self.cfg = SCALP_SYMBOLS.get(self.symbol, SCALP_SYMBOLS["NIFTY"])
+        self.position: Optional[dict] = None
+        self._order_id: str = ""
+        self._last_candle_count = 0
+        self._proximity_tested = False
+        self._mtm_loop_count = 0
+        self._prev_adx = 0.0
+
+    # ── Helpers ──────────────────────────────────────────────
+
+    def _get_index_token(self) -> Optional[int]:
+        target = self.cfg["index_token_symbol"]
+        for exchange in self.cfg["index_exchanges"]:
+            try:
+                for row in self.kite.kite.instruments(exchange):
+                    tsym = row.get("tradingsymbol", "")
+                    if tsym == target:
+                        return int(row["instrument_token"])
+            except Exception:
+                continue
+        return None
+
+    def _get_3min_candles(self, token: int, lookback_hours: int = 48) -> list:
+        to_dt = datetime.now()
+        try:
+            return self.kite.kite.historical_data(
+                token, to_dt - timedelta(hours=lookback_hours), to_dt, SCALP_TIMEFRAME
+            )
+        except Exception as e:
+            log.warning(f"  {self.symbol} hist data error: {e}")
+            return []
+
+    def _get_nearest_expiry(self) -> Optional[str]:
+        instruments = self.kite.get_option_instruments()
+        name = self.cfg["name"]
+        ex = self.cfg["exchange"]
+        filtered = [r for r in instruments if r["exchange"] == ex and r["name"] == name]
+        return nearest_expiry_today(filtered)
+
+    def _get_atm_option(self, spot: float, is_ce: bool, expiry: str) -> Optional[dict]:
+        strike_gap = self.cfg["strike_gap"]
+        atm = int(round(spot / strike_gap) * strike_gap)
+        otype = "CE" if is_ce else "PE"
+        exchange = self.cfg["exchange"]
+        name = self.cfg["name"]
+        self.kite._fetch_instruments()
+        for r in self.kite._instruments:
+            if (r["exchange"] == exchange and r["name"] == name
+                    and r["expiry"] == expiry and r["instrument_type"] == otype
+                    and abs(float(r["strike"]) - atm) < 1):
+                return {"tsym": r["tradingsymbol"], "strike": atm,
+                        "lot_size": int(r.get("lot_size", LOT_SIZE)), "expiry": expiry}
+        return None
+
+    def _get_option_premium(self, tsym: str) -> float:
+        exchange = self.cfg["exchange"]
+        try:
+            q = self.kite.kite.ltp(f"{exchange}:{tsym}")
+            return q.get(f"{exchange}:{tsym}", {}).get("last_price", 0)
+        except Exception:
+            return 0
+
+    def _get_spot(self) -> float:
+        sym = self.cfg["spot_symbol"]
+        try:
+            result = api_retry(self.kite.kite.ltp, sym)
+            return result[sym]["last_price"] if result else 0.0
+        except Exception:
+            return 0.0
+
+    # ── Indicator calculations ───────────────────────────────
+
+    def _calc_adx(self, candles: list) -> Optional[dict]:
+        """Return ADX analysis with current, previous adx."""
+        result = calc_adx(candles, SCALP_ADX_LENGTH)
+        if result is None:
+            return None
+        prev = calc_adx(candles[:-1], SCALP_ADX_LENGTH) if len(candles) > SCALP_ADX_LENGTH + 2 else result
+        prev_adx_val = prev["adx"] if prev else result["adx"]
+        return {
+            "adx": result["adx"],
+            "prev_adx": prev_adx_val,
+            "plus_di": result["plus_di"],
+            "minus_di": result["minus_di"],
+            "crossed_above": result["adx"] >= SCALP_ADX_TRIGGER > prev_adx_val,
+        }
+
+    def _calc_supertrend(self, candles: list) -> Optional[dict]:
+        return calc_supertrend(candles, SCALP_SUPERTREND_LENGTH, SCALP_SUPERTREND_MULTIPLIER)
+
+    # ── Pre-trade proximity health checks ────────────────────
+
+    def _run_pre_trade_checks(self, side_label: str):
+        """Run periodic_connection_test + check_ip_whitelist when ADX nears trigger."""
+        telegram_logger.send_telegram(
+            f"SCALP {self.symbol} proximity — ADX near {SCALP_ADX_TRIGGER}, running pre-trade checks ({side_label})",
+            level="INFO")
+        periodic_connection_test(self.kite, self.cfg["exchange"])
+        ip_ok = check_ip_whitelist(self.kite)
+        if ip_ok is True:
+            telegram_logger.send_telegram(
+                f"SCALP {self.symbol} pre-trade OK — IP whitelisted ({side_label})", level="INFO")
+        elif ip_ok is False:
+            msg = f"SCALP {self.symbol} pre-trade FAIL — IP NOT whitelisted ({side_label})"
+            log.warning(msg)
+            telegram_logger.send_telegram(msg, level="WARNING")
+
+    # ── Entry ────────────────────────────────────────────────
+
+    def _enter_trade(self, side: str, entry_candle: dict, entry_index: int) -> bool:
+        """Place market order for ATM CE/PE option, set initial SL."""
+        spot = self._get_spot()
+        if spot <= 0:
+            return False
+        expiry = self._get_nearest_expiry()
+        if not expiry:
+            return False
+        is_ce = side == "CE"
+        opt = self._get_atm_option(spot, is_ce, expiry)
+        if not opt:
+            return False
+
+        exchange = self.cfg["exchange"]
+        tsym = opt["tsym"]
+        qty = opt["lot_size"] * self.lots
+        entry_prem = self._get_option_premium(tsym)
+        sl_price = entry_candle["low"] if is_ce else entry_candle["high"]
+        risk = abs(entry_prem - sl_price) if entry_prem > 0 else 0
+
+        print(f"  {bold(green('ENTER'))} {self.symbol} {side} {tsym} x{qty} @ ₹{entry_prem:.2f} | SL ₹{sl_price:.2f}")
+        try:
+            if is_market_open():
+                oid = self.kite.place_market(tsym, "BUY", qty, exchange=exchange)
+            else:
+                oid = self.kite.place_limit(tsym, "BUY", qty, entry_prem or 100, exchange=exchange)
+        except Exception as e:
+            print(f"  {red('✗ Entry')}: {e}")
+            return False
+
+        if not oid:
+            return False
+
+        self._order_id = oid
+        fill_prem = entry_prem
+        if is_market_open() and oid:
+            fills = self.kite.get_fill_prices({tsym: oid})
+            if fills.get(tsym, 0) > 0:
+                fill_prem = fills[tsym]
+                risk = abs(fill_prem - sl_price)
+
+        self.position = {
+            "side": side,
+            "tsym": tsym,
+            "exchange": exchange,
+            "qty": qty,
+            "entry_price": fill_prem,
+            "entry_sl": sl_price,
+            "sl": sl_price,
+            "entry_spot": spot,
+            "init_risk": risk,
+            "trail_level": 0,
+            "entry_time": datetime.now().isoformat(),
+            "expiry": expiry,
+            "strike": opt["strike"],
+        }
+        telegram_logger.strategy_entry_alert(f"SCALPER {self.symbol}", [{
+            "action": "BUY", "tradingsymbol": tsym, "strike": opt["strike"],
+            "option_type": side, "premium": fill_prem,
+        }])
+        log.info(f"SCALP {self.symbol} ENTRY {side} {tsym} x{qty} fill=₹{fill_prem:.2f} risk=₹{risk:.2f}")
+        return True
+
+    # ── Monitor & Trail ──────────────────────────────────────
+
+    def _monitor(self) -> str:
+        if not self.position:
+            return "NO_POSITION"
+        t = self.position
+        tsym = t["tsym"]
+        current_prem = self._get_option_premium(tsym)
+        is_ce = t["side"] == "CE"
+        entry = t["entry_price"]
+        sl = t["sl"]
+        init_risk = t["init_risk"]
+
+        # SL hit check
+        if (is_ce and current_prem <= sl) or (not is_ce and current_prem >= sl):
+            print(f"  SL hit {tsym} @ ₹{current_prem:.2f}")
+            return "SL_HIT"
+
+        # Trailing logic
+        points = abs(current_prem - entry)
+        if init_risk > 0:
+            rr = points / init_risk
+
+            # 1:1 RR → trail to breakeven
+            if rr >= SCALP_TRAIL_BREAKEVEN_RR and t["trail_level"] < 1:
+                t["sl"] = entry
+                t["trail_level"] = 1
+                print(f"  Trail {tsym} SL to breakeven ₹{entry:.2f} (RR 1:1)")
+                log.info(f"SCALP trail breakeven {tsym}")
+
+            # 1:1.5 / 3.0 / 4.5 ... increments
+            target_rr = SCALP_TRAIL_BREAKEVEN_RR + SCALP_TRAIL_INCREMENT_RR * t["trail_level"]
+            if rr >= target_rr and t["trail_level"] >= 1:
+                new_sl = entry + (target_rr - SCALP_TRAIL_INCREMENT_RR) * init_risk if is_ce else entry - (target_rr - SCALP_TRAIL_INCREMENT_RR) * init_risk
+                if (is_ce and new_sl > t["sl"]) or (not is_ce and new_sl < t["sl"]):
+                    t["sl"] = new_sl
+                    t["trail_level"] += 1
+                    print(f"  Trail {tsym} SL to ₹{new_sl:.2f} (RR {target_rr:.1f}:1)")
+                    log.info(f"SCALP trail {tsym} level {t['trail_level']} SL ₹{new_sl:.2f}")
+
+        return "HOLD"
+
+    # ── Exit ─────────────────────────────────────────────────
+
+    def _exit(self, reason: str):
+        if not self.position:
+            return
+        t = self.position
+        tsym = t["tsym"]
+        qty = t["qty"]
+        exchange = t.get("exchange", self.cfg["exchange"])
+        exit_prem = self._get_option_premium(tsym)
+        pnl = (exit_prem - t["entry_price"]) * qty
+        print(f"  {bold(red('EXIT'))} ({reason}) {tsym} P&L ₹{pnl:+.2f}")
+        try:
+            self.kite.place_market(tsym, "SELL", qty, exchange=exchange)
+        except Exception as e:
+            print(f"  {red('✗ Exit')}: {e}")
+        charges = calc_charges([{"action": "BUY", "premium": t["entry_price"]}], qty, exchange=exchange)
+        append_trade_log({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "strategy": f"SCALP_{self.symbol}_{t['side']}",
+            "expiry": t.get("expiry", ""),
+            "entry_time": t.get("entry_time", ""),
+            "exit_time": datetime.now().isoformat(),
+            "entry_spot": round(t.get("entry_spot", 0), 2),
+            "exit_spot": round(self._get_spot(), 2),
+            "entry_credit": round(t["entry_price"], 2),
+            "exit_value": round(exit_prem, 2),
+            "pnl": round(pnl, 2),
+            "charges": charges,
+            "max_profit_target": 0,
+            "stop_loss": round(t.get("entry_sl", 0), 2),
+            "exit_reason": reason,
+        })
+        telegram_logger.strategy_exit_alert(f"SCALPER {self.symbol}", reason, pnl)
+        self.position = None
+        self._order_id = ""
+        print("Done.")
+
+    # ── Run loop ────────────────────────────────────────────
+
+    def run(self):
+        label = self.cfg["label"]
+        print(f"{bold(cyan(f'3-Min Scalper — {label} ADX(14) + Supertrend(10, 3.0)'))}")
+
+        token = self._get_index_token()
+        if not token:
+            log.error(f"Could not find {self.symbol} index token")
+            return
+
+        while True:
+            if SYSTEM_HALTED:
+                log.warning("SCALP — system halted.")
+                return
+            if self._mtm_loop_count % 10 == 0:
+                if check_global_mtm(self.kite):
+                    if self.position:
+                        self._exit("GLOBAL_MTM_HALT")
+                    return
+            self._mtm_loop_count += 1
+            monitor_ip_status(self.kite)
+
+            now = datetime.now()
+            if not is_market_open():
+                next_open = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                if now.weekday() >= 4:
+                    next_open += timedelta(days=(7 - now.weekday()))
+                time.sleep(min((next_open - now).total_seconds(), 3600))
+                continue
+
+            # ── Manage active position ──
+            if self.position:
+                action = self._monitor()
+                if action == "SL_HIT":
+                    self._exit("SL_HIT")
+                    continue
+                time.sleep(5)
+                continue
+
+            # ── Entry phase: wait for new 3-min candle close ──
+            raw = self._get_3min_candles(token)
+            if len(raw) < SCALP_ADX_LENGTH + 2:
+                time.sleep(10)
+                continue
+
+            if len(raw) == self._last_candle_count:
+                time.sleep(5)
+                continue
+            self._last_candle_count = len(raw)
+
+            # Calculate indicators on the last complete candle
+            adx_result = self._calc_adx(raw)
+            st_result = self._calc_supertrend(raw)
+            if adx_result is None or st_result is None:
+                time.sleep(5)
+                continue
+
+            current_adx = adx_result["adx"]
+            close_price = raw[-1]["close"]
+
+            # ── Pre-trade proximity check ──
+            if current_adx >= SCALP_ADX_PROXIMITY and not self._proximity_tested:
+                side_hint = "CE" if close_price > st_result["supertrend"] else "PE" if close_price < st_result["supertrend"] else "N/A"
+                self._run_pre_trade_checks(side_hint)
+                self._proximity_tested = True
+            elif current_adx < SCALP_ADX_PROXIMITY - 1:
+                self._proximity_tested = False
+
+            # ── Entry signal: ADX crosses above 20 + Supertrend filter ──
+            if adx_result["crossed_above"]:
+                above_st = close_price > st_result["supertrend"]
+                below_st = close_price < st_result["supertrend"]
+
+                if above_st:
+                    log.info(f"SCALP signal — ADX {current_adx:.1f} crossed above {SCALP_ADX_TRIGGER}, close above ST")
+                    self._enter_trade("CE", raw[-1], -1)
+                elif below_st:
+                    log.info(f"SCALP signal — ADX {current_adx:.1f} crossed above {SCALP_ADX_TRIGGER}, close below ST")
+                    self._enter_trade("PE", raw[-1], -1)
+                else:
+                    log.debug(f"SCALP no entry — close {close_price:.2f} at ST {st_result['supertrend']:.2f}")
+
+            time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
 # Credit Spread runner
 # ---------------------------------------------------------------------------
 
@@ -2858,9 +3501,15 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
             if now < target:
                 print(f"Wait until 10:00 ({((target-now).total_seconds()):.0f}s)...")
                 while datetime.now() < target:
+                    if SYSTEM_HALTED:
+                        log.warning("CS entry aborted — system halted.")
+                        return
                     time.sleep(30)
 
         while manager.position is None:
+            if SYSTEM_HALTED:
+                log.warning("CS entry aborted — system halted.")
+                return
             if not is_market_open():
                 print("Market closed.")
                 return
@@ -2871,6 +3520,9 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
 
             cs = manager.scan()
             while not cs:
+                if SYSTEM_HALTED:
+                    log.warning("CS entry aborted — system halted.")
+                    return
                 if not is_market_open():
                     print("Market closed.")
                     return
@@ -2889,20 +3541,26 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                             continue
                         pos_entry = {"expiry": ic.expiry, "entry_credit": ic.net_credit,
                                      "legs": [asdict(l) for l in ic.legs]}
-                        save_config({**load_config(), "position": pos_entry})
+                        save_config({**load_config(), "cs_fallback_ic_position": pos_entry})
                         ok = ic_manager.enter(ic)
                         if not ok:
                             log.warning("IC fail, retry CS...")
                             time.sleep(60)
                             cs = manager.scan()
                             continue
+                        if SYSTEM_HALTED:
+                            log.warning("CS fallback IC — system halted.")
+                            return
                         if not is_market_open():
                             log.info("AMO, waiting market open...")
                             wait_for_market_open()
+                            if SYSTEM_HALTED:
+                                log.warning("CS fallback IC — system halted during market open wait.")
+                                return
                             time.sleep(30)
                             if not ic_manager.verify_fills():
                                 c = load_config()
-                                c.pop("position", None)
+                                c.pop("cs_fallback_ic_position", None)
                                 save_config(c)
                                 log.warning("IC fills fail, retry CS...")
                                 time.sleep(60)
@@ -2912,7 +3570,7 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                             time.sleep(5)
                             if not ic_manager.verify_fills():
                                 c = load_config()
-                                c.pop("position", None)
+                                c.pop("cs_fallback_ic_position", None)
                                 save_config(c)
                                 log.warning("IC fills fail, retry CS...")
                                 time.sleep(60)
@@ -2922,6 +3580,14 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                         log.info(f"IC monitor ({target_str}, SL @ credit)")
                         try:
                             while True:
+                                if SYSTEM_HALTED or check_global_mtm(kite):
+                                    log.warning("CS fallback IC — global MTM limit breached.")
+                                    if ic_manager.position:
+                                        ic_manager.exit("GLOBAL_MTM_HALT")
+                                    c = load_config()
+                                    c.pop("cs_fallback_ic_position", None)
+                                    save_config(c)
+                                    return
                                 monitor_ip_status(kite)
                                 if not kite.ensure_auth():
                                     time.sleep(60)
@@ -2931,7 +3597,7 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
                                 if action in ("EXIT_PROFIT", "EXIT_LOSS", "EXIT_TIME"):
                                     ic_manager.exit(action)
                                     c = load_config()
-                                    c.pop("position", None)
+                                    c.pop("cs_fallback_ic_position", None)
                                     save_config(c)
                                     return
                         except Exception as e:
@@ -2994,8 +3660,27 @@ def _run_credit_spread(kite: KiteSession, manager: CreditSpreadManager, args):
 
     target_str = "short prem ≤ ₹2" if manager.position.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{CS_PROFIT_TARGET_RS} profit"
     log.info(f"Monitoring every 10s. Target: {target_str}, SL at credit.")
+    _mtm_check_counter = 0
     try:
         while True:
+            if SYSTEM_HALTED:
+                if manager.position:
+                    manager.exit("GLOBAL_MTM_HALT")
+                c = load_config()
+                c.pop("cs_position", None)
+                save_config(c)
+                log.info("Halted by global MTM limit.")
+                return
+            if _mtm_check_counter % 6 == 0:
+                if check_global_mtm(kite):
+                    if manager.position:
+                        manager.exit("GLOBAL_MTM_HALT")
+                    c = load_config()
+                    c.pop("cs_position", None)
+                    save_config(c)
+                    log.info("Halted by global MTM limit.")
+                    return
+            _mtm_check_counter += 1
             monitor_ip_status(kite)
             if not kite.ensure_auth():
                 time.sleep(10)
@@ -3318,6 +4003,19 @@ def _run_manual_trade(kite: KiteSession, args):
     check_counter = 0
     try:
         while True:
+            if SYSTEM_HALTED:
+                log.warning("MT — system halted, exiting all trades.")
+                for trade in list(manager.trades):
+                    manager._exit(trade)
+                manager.clear_config()
+                return
+            if check_counter % 6 == 0:
+                if check_global_mtm(kite):
+                    log.warning("MT — global MTM limit breached, exiting all trades.")
+                    for trade in list(manager.trades):
+                        manager._exit(trade)
+                    manager.clear_config()
+                    return
             monitor_ip_status(kite)
             if not kite.ensure_auth():
                 time.sleep(60)
@@ -3379,27 +4077,182 @@ def check_ip_whitelist(kite: "KiteSession") -> Optional[bool]:
     except Exception as e:
         msg = str(e).lower()
         if "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
-            v6 = get_local_ipv6()
-            v4 = get_public_ip_v4()
-            warn = f"IP NOT WHITELISTED! Update Zerodha Developer console.\n  IPv4: {v4 or 'N/A'}\n  IPv6: {v6 or 'N/A'}"
-            print(f"  ⚠ {warn}")
             _last_whitelist_ok = False
             return False
         return None
 
 def monitor_ip_status(kite: "KiteSession"):
-    """Periodic IP whitelist check. Prints status changes."""
+    """Periodic IP whitelist check."""
     global _last_known_ipv6
     v6 = get_local_ipv6()
     if v6 and v6 != _last_known_ipv6:
-        log.warning(f"IPv6 changed: {_last_known_ipv6 or 'N/A'} → {v6}")
         _last_known_ipv6 = v6
-    result = check_ip_whitelist(kite)
-    if result is False:
-        log.warning("IP is NOT whitelisted. Fix immediately to avoid trade failures.")
-    elif result is True:
-        pass  # silent when OK
+    check_ip_whitelist(kite)
     heartbeat()
+
+# ── Global MTM Stop-Loss ──────────────────────
+
+def _today_ist() -> str:
+    """Return today's date string in IST."""
+    return datetime.now(IST).strftime("%Y-%m-%d")
+
+def check_global_mtm(kite: "KiteSession") -> bool:
+    """Check cumulative P&L (closed + unrealised) against GLOBAL_MAX_DAILY_LOSS.
+    Returns True if MTM limit breached and system should halt."""
+    global SYSTEM_HALTED, GLOBAL_HALT_DATE
+    if SYSTEM_HALTED:
+        return True
+    today = _today_ist()
+    # Compute closed P&L from today's trade_log entries
+    closed_pnl = 0.0
+    try:
+        if os.path.exists(TRADE_LOG):
+            with open(TRADE_LOG, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row.get("date", "") == today:
+                        try:
+                            closed_pnl += float(row.get("pnl", 0))
+                        except (ValueError, TypeError):
+                            pass
+    except Exception as e:
+        log.warning(f"MTM check — trade_log read error: {e}")
+
+    # Compute unrealised P&L from Zerodha positions
+    live_pnl = 0.0
+    try:
+        all_pos = api_retry(kite.kite.positions)
+        if all_pos:
+            for p in all_pos.get("net", []):
+                try:
+                    live_pnl += float(p.get("pnl", 0))
+                except (ValueError, TypeError):
+                    pass
+    except Exception as e:
+        log.warning(f"MTM check — positions fetch error: {e}")
+
+    total = closed_pnl + live_pnl
+    log.debug(f"MTM check — closed P&L: ₹{closed_pnl:+.2f} | live MTM: ₹{live_pnl:+.2f} | total: ₹{total:+.2f} | limit: ₹{-GLOBAL_MAX_DAILY_LOSS:,.0f}")
+
+    if total < -GLOBAL_MAX_DAILY_LOSS:
+        SYSTEM_HALTED = True
+        GLOBAL_HALT_DATE = today
+        msg = (f"🚨 GLOBAL MTM LIMIT BREACHED!\n"
+               f"Limit: ₹{-GLOBAL_MAX_DAILY_LOSS:,.0f}\n"
+               f"Closed P&L: ₹{closed_pnl:+.2f}\n"
+               f"Live MTM: ₹{live_pnl:+.2f}\n"
+               f"Total: ₹{total:+.2f}\n"
+               f"Action: Halting all strategies for today ({today}).")
+        log.critical(msg)
+        telegram_logger.send_telegram(msg, level="CRITICAL")
+        # Emergency exit all open positions
+        emergency_kill_switch(kite)
+        return True
+    return False
+
+
+# ── Emergency Kill Switch ─────────────────────
+
+_kill_in_progress = False
+
+def emergency_kill_switch(kite: "KiteSession"):
+    """Immediately cancel all pending orders and square off all open positions.
+    Safe to call from any context — Flask route, CLI, or MTM breach."""
+    global SYSTEM_HALTED, _kill_in_progress
+    if _kill_in_progress:
+        return
+    _kill_in_progress = True
+    SYSTEM_HALTED = True
+    log.warning("EMERGENCY KILL SWITCH ACTIVATED — squaring off all positions...")
+    telegram_logger.send_telegram("🚨 EMERGENCY KILL SWITCH ACTIVATED — squaring off all open positions.", level="CRITICAL")
+
+    # Phase 1: Cancel all pending/open orders across NFO and BFO
+    try:
+        orders = api_retry(kite.kite.orders)
+        if orders:
+            for o in orders:
+                status = o.get("status", "")
+                if status in ("OPEN", "TRIGGER PENDING", "PENDING"):
+                    oid = o.get("order_id", "")
+                    if oid:
+                        try:
+                            api_retry(kite.kite.cancel_order, "regular", oid)
+                        except Exception:
+                            try:
+                                api_retry(kite.kite.cancel_order, "amo", oid)
+                            except Exception:
+                                pass
+            log.info("Kill switch — pending orders cancelled.")
+    except Exception as e:
+        log.warning(f"Kill switch — order cancellation error: {e}")
+
+    # Phase 2: Market-exit every open leg across all exchanges
+    try:
+        all_pos = api_retry(kite.kite.positions)
+        if all_pos:
+            # Collect unique day positions (avoid duplicates between day+net)
+            seen_tsyms = set()
+            for lst_key in ("day", "net"):
+                for p in all_pos.get(lst_key, []):
+                    tsym = p.get("tradingsymbol", "")
+                    qty = int(p.get("quantity", 0))
+                    if not tsym or qty == 0 or tsym in seen_tsyms:
+                        continue
+                    seen_tsyms.add(tsym)
+                    exchange = p.get("exchange", "NFO")
+                    reverse = "SELL" if qty > 0 else "BUY"
+                    try:
+                        oid = api_retry(kite.place_market, tsym, reverse, abs(qty), exchange=exchange)
+                        if oid:
+                            log.debug(f"Kill switch — placed {reverse} {tsym} x{abs(qty)} oid={oid}")
+                    except Exception as e:
+                        log.warning(f"Kill switch — exit failed for {tsym}: {e}")
+            log.info("Kill switch — all positions squared off.")
+    except Exception as e:
+        log.warning(f"Kill switch — position square-off error: {e}")
+
+    # Phase 3: Fetch actual fill prices and log exit
+    try:
+        log.info("Kill switch — verifying fills...")
+        time.sleep(2)
+        exit_pnl = 0.0
+        orders_after = api_retry(kite.kite.orders)
+        if orders_after:
+            for o in orders_after:
+                if o.get("status") == "COMPLETE" and o.get("filled_quantity", 0) > 0:
+                    tsym_o = o.get("tradingsymbol", "")
+                    avg = float(o.get("average_price", 0))
+                    qty_filled = int(o.get("filled_quantity", 0))
+                    ttype = o.get("transaction_type", "")
+                    log.debug(f"Kill switch fill — {tsym_o} {ttype} x{qty_filled} @ ₹{avg:.2f}")
+                    if ttype == "SELL":
+                        exit_pnl += avg * qty_filled
+                    else:
+                        exit_pnl -= avg * qty_filled
+        log.info(f"Kill switch — estimated exit P&L from fills: ₹{exit_pnl:+.2f}")
+    except Exception as e:
+        log.warning(f"Kill switch — fill verification error: {e}")
+
+    # Phase 4: Release all strategy lock files
+    for fname in os.listdir(os.path.dirname(__file__)):
+        if fname.startswith(".bot_lock_"):
+            _safe_unlink(os.path.join(os.path.dirname(__file__), fname))
+    log.info("Kill switch — all lock files released.")
+
+    # Phase 5: Clean saved position states from config
+    try:
+        cfg = load_config()
+        for key in ("position", "cs_position", "cs_fallback_ic_position", SCALPER_CONFIG_KEY, "manual_trades"):
+            cfg.pop(key, None)
+        save_config(cfg)
+    except Exception as e:
+        log.warning(f"Kill switch — config cleanup error: {e}")
+
+    _kill_in_progress = False
+    log.critical("EMERGENCY KILL SWITCH COMPLETE — bot halted for the day.")
+    telegram_logger.send_telegram(
+        "✅ EMERGENCY KILL SWITCH COMPLETE — all positions squared off, bot halted for the day.",
+        level="CRITICAL")
+
 
 def main():
     global log
@@ -3410,10 +4263,12 @@ def main():
     parser.add_argument("--login", action="store_true", help="Login to Zerodha")
     parser.add_argument("--resume", action="store_true", help="Scan live Zerodha positions and monitor")
     parser.add_argument("--test-ip", action="store_true", help="Test if whitelisted IP works via dummy order")
-    parser.add_argument("--strategy", choices=["ic", "sma", "cs", "mt", "bnf", "n1h"], default="ic",
-                        help="Strategy: ic (Iron Condor), cs (Credit Spread), sma (SMA Crossover), bnf (Bank Nifty SMA), n1h (Nifty 1H SMA Options)")
+    parser.add_argument("--strategy", choices=["ic", "sma", "cs", "mt", "bnf", "n1h", "sc"], default="ic",
+                        help="Strategy: ic (Iron Condor), cs (Credit Spread), sma (SMA Crossover), bnf (Bank Nifty SMA), n1h (Nifty 1H SMA Options), sc (3-Min Scalper)")
     parser.add_argument("--lots", type=int, default=1, help="Lot multiplier (e.g. 2 = 2x lot quantity)")
     parser.add_argument("--sl", type=float, default=None, help="Manual trade SL in points (e.g. 10 for ₹10)")
+    parser.add_argument("--symbol", type=str, default="NIFTY", choices=["NIFTY", "BANKNIFTY", "SENSEX"], help="Index symbol for sc strategy")
+    parser.add_argument("--kill", action="store_true", help="Emergency kill switch — square off all positions and halt")
     args = parser.parse_args()
 
     cfg_file = Path(CONFIG_FILE)
@@ -3463,24 +4318,21 @@ def main():
         if "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
             log.warning(f"IP not whitelisted: {e}")
 
+    if args.kill:
+        log.warning("--kill invoked from command line")
+        emergency_kill_switch(kite)
+        return
+
     if args.test_ip:
         try:
-            instruments = kite.get_option_instruments()
-            if not instruments:
-                log.warning("IP check: no instruments")
-                return
-            tsym = instruments[0]["tradingsymbol"]
-            kite.kite.place_order(
-                "regular", exchange="NFO", tradingsymbol=tsym,
-                transaction_type="BUY", quantity=9999, price=0,
-                product="NRML", order_type="MARKET", validity="DAY",
-            )
+            kite.kite.profile()
+            log.info("  IP: whitelisted — profile() OK")
         except Exception as e:
             msg = str(e).lower()
-            if "margin" in msg or "funds" in msg or "insufficient" in msg:
-                log.info("  IP: whitelisted")
+            if "ip" in msg and ("not allowed" in msg or "whitelist" in msg):
+                log.warning(f"  IP: NOT whitelisted — {e}")
             else:
-                log.warning(f"  IP: {e}")
+                log.warning(f"  IP check error: {e}")
         return
 
     # Strategy dispatch
@@ -3507,6 +4359,15 @@ def main():
             n1h.run()
         except Exception as e:
             telegram_logger.error_alert("N1H Options Strategy", str(e))
+            raise
+        return
+
+    if args.strategy == "sc":
+        scalper = Scalper3Min(kite, symbol=args.symbol, lots=args.lots)
+        try:
+            scalper.run()
+        except Exception as e:
+            telegram_logger.error_alert(f"3-Min Scalper ({args.symbol}) Strategy", str(e))
             raise
         return
 
@@ -3566,9 +4427,15 @@ def main():
             if now < target:
                 log.info(f"Waiting until 10:00 AM ({((target-now).total_seconds()):.0f}s)...")
                 while datetime.now() < target:
+                    if SYSTEM_HALTED:
+                        log.warning("IC entry aborted — system halted.")
+                        return
                     time.sleep(30)
 
         while manager.position is None:
+            if SYSTEM_HALTED:
+                log.warning("IC entry aborted — system halted.")
+                return
             c = load_config()
             if c.get("position") and not args.resume:
                 break
@@ -3633,8 +4500,27 @@ def main():
 
     target_str = "short premium ≤ ₹2" if ic.expiry == datetime.now().strftime("%Y-%m-%d") else f"₹{PROFIT_TARGET_RS} profit"
     log.info(f"Monitoring ({target_str}, SL @ credit)")
+    _mtm_check_counter = 0
     try:
         while True:
+            if SYSTEM_HALTED:
+                if manager.position:
+                    manager.exit("GLOBAL_MTM_HALT")
+                c = load_config()
+                c.pop("position", None)
+                save_config(c)
+                log.info("Halted by global MTM limit.")
+                return
+            if _mtm_check_counter % 6 == 0:
+                if check_global_mtm(kite):
+                    if manager.position:
+                        manager.exit("GLOBAL_MTM_HALT")
+                    c = load_config()
+                    c.pop("position", None)
+                    save_config(c)
+                    log.info("Halted by global MTM limit.")
+                    return
+            _mtm_check_counter += 1
             monitor_ip_status(kite)
             if not kite.ensure_auth():
                 time.sleep(60)

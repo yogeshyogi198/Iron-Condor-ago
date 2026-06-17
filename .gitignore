@@ -1,8 +1,6 @@
-kite_config.json
-iron_condor_algo_reference.txt
-.bot_lock_*
-.bot_heartbeat.txt
-trade_log.csv
-__pycache__/
-*.pyc
-.env
+# Only .py and README.md are tracked — everything else is ignored
+*
+!*.py
+!README.md
+!.gitignore
+!.env.example

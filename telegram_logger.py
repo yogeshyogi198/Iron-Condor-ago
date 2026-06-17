@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    from pytz import timezone
+    IST = timezone("Asia/Kolkata")
+
 CONFIG_FILE = Path(__file__).parent / "kite_config.json"
 _last_send: float = 0
 _MIN_INTERVAL = 10
@@ -39,6 +46,10 @@ def _get_telegram_creds():
     return token, chat_id
 
 
+def _ist_now() -> str:
+    return datetime.now(IST).strftime("%d-%b-%Y %I:%M:%S %p")
+
+
 def send_telegram(message: str, level: str = "INFO") -> bool:
     global _last_send
     token, chat_id = _get_telegram_creds()
@@ -49,7 +60,7 @@ def send_telegram(message: str, level: str = "INFO") -> bool:
         return False
     _last_send = now
     icon = _ICONS.get(level, "📌")
-    time_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    time_str = _ist_now()
     text = f"{icon} *{level}* | `{time_str}`\n```\n{message}\n```"
     payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode()
     ctx = ssl._create_unverified_context()
@@ -68,43 +79,240 @@ def send_telegram(message: str, level: str = "INFO") -> bool:
         return False
 
 
-# ── Trade helpers ──────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  1. ENTRY ALERT — enriched with direction, PCR, IST time
+# ═══════════════════════════════════════════════════════════
 
 def trade_alert(symbol: str, action: str, price: float, qty: int):
     send_telegram(f"{symbol} | {action.upper()} {qty} @ ₹{price:.2f}", level="TRADE")
 
 
-def pnl_alert(pnl: float, trade_id: str = ""):
-    level = "PROFIT" if pnl >= 0 else "LOSS"
-    msg = f"P&L: ₹{pnl:+.2f}"
-    if trade_id:
-        msg = f"[{trade_id}] {msg}"
-    send_telegram(msg, level=level)
+def strategy_entry_alert(
+    strategy: str,
+    legs: list,
+    pcr_classification: str = "N/A",
+):
+    instrument = legs[0].get("tradingsymbol", "NIFTY") if legs else "NIFTY"
+    instrument = instrument.replace("NIFTY", "").replace("SENSEX", "").replace("BANKNIFTY", "").strip() or \
+                next((l.get("tradingsymbol", "") for l in legs if l.get("tradingsymbol")), "NIFTY")
 
+    sell_legs = [l for l in legs if l.get("action") == "SELL"]
+    buy_legs = [l for l in legs if l.get("action") == "BUY"]
 
-def strategy_entry_alert(strategy: str, legs: list):
-    lines = [f"🚀 *{strategy} ENTERED*"]
+    if sell_legs and buy_legs:
+        if all(l.get("option_type") == "CE" for l in legs):
+            direction = "Bull Call Spread"
+        elif all(l.get("option_type") == "PE" for l in legs):
+            direction = "Bear Put Spread"
+        elif any(l.get("option_type") == "CE" for l in sell_legs) and any(l.get("option_type") == "PE" for l in sell_legs):
+            direction = "Iron Condor — Dual Side"
+        else:
+            side = sell_legs[0].get("option_type", "?")
+            d = "Bullish" if side == "CE" else "Bearish"
+            direction = f"{d} Credit Spread"
+    elif len(legs) == 1:
+        act = legs[0].get("action", "")
+        otype = legs[0].get("option_type", "")
+        d = "Bullish" if otype == "CE" else "Bearish"
+        direction = f"{act} {otype} — {d} Crossover"
+    else:
+        direction = "Multi-Leg Strategy"
+
+    lots = 0
+    fill_prices = []
+    tsyms = []
     for leg in legs:
-        act = leg.get("action", "")
-        strike = leg.get("strike", 0)
-        otype = leg.get("option_type", "")
+        tsyms.append(leg.get("tradingsymbol", ""))
         prem = leg.get("premium", 0)
-        tsym = leg.get("tradingsymbol", "")
-        lines.append(f"  {act} {tsym} @ ₹{prem:.2f}")
-    net = sum(l.get("premium", 0) for l in legs if l.get("action") == "SELL") - \
-          sum(l.get("premium", 0) for l in legs if l.get("action") == "BUY")
-    lines.append(f"  Net Credit: ₹{net:.2f}")
-    send_telegram("\n".join(lines), level="TRADE")
+        if prem > 0:
+            fill_prices.append(prem)
+
+    net_credit = sum(l.get("premium", 0) for l in sell_legs) - sum(l.get("premium", 0) for l in buy_legs)
+
+    exec_price_str = " | ".join(f"₹{p:.2f}" for p in fill_prices[:4]) if fill_prices else "LTP-based"
+
+    # Estimate lots from first leg
+    from_tsym = tsyms[0] if tsyms else ""
+    if "NIFTY" in from_tsym:
+        lots_str = "1 (65 qty)"
+    elif "SENSEX" in from_tsym:
+        lots_str = "1 (15-20 qty)"
+    elif "BANKNIFTY" in from_tsym:
+        lots_str = "1 (15 qty)"
+    else:
+        lots_str = "1"
+
+    time_str = _ist_now()
+
+    msg = (
+        f"🚀 [ENTRY] — {strategy} ({instrument})\n"
+        f"{'─' * 40}\n"
+        f"Direction/Logic:  {direction}\n"
+        f"Execution Price:  {exec_price_str}\n"
+        f"Lots/Quantity:    {lots_str}\n"
+        f"Net Credit:       ₹{net_credit:+.2f}\n"
+        f"Market PCR:       {pcr_classification}\n"
+        f"{'─' * 40}\n"
+        f"🕐 {time_str}"
+    )
+    send_telegram(msg, level="TRADE")
 
 
-def strategy_exit_alert(strategy: str, reason: str, pnl: float):
+# ═══════════════════════════════════════════════════════════
+#  2. EXIT / P&L ALERT — financial breakdown with charges
+# ═══════════════════════════════════════════════════════════
+
+def pnl_alert(pnl: float, trade_id: str = "", gross_pnl: float = None, charges: float = None):
+    time_str = _ist_now()
     icon = "✅" if pnl >= 0 else "❌"
-    send_telegram(f"{icon} *{strategy} EXIT* ({reason})\nP&L: ₹{pnl:+.2f}",
-                  level="PROFIT" if pnl >= 0 else "LOSS")
+    gross = gross_pnl if gross_pnl is not None else pnl
+    chg = charges if charges is not None else 0.0
+    net = gross - chg
+
+    msg = (
+        f"🏁 [P&L UPDATE] — {trade_id or 'Trade'}\n"
+        f"{'─' * 40}\n"
+        f"Gross P&L:   ₹{gross:+,.2f}\n"
+        f"Charges:     ₹{chg:,.2f}\n"
+        f"NET P&L:     {icon} ₹{net:+,.2f}\n"
+        f"{'─' * 40}\n"
+        f"🕐 {time_str}"
+    )
+    send_telegram(msg, level="PROFIT" if net >= 0 else "LOSS")
 
 
-def error_alert(context: str, error_msg: str):
-    send_telegram(f"🔴 *ERROR* [{context}]\n{error_msg}", level="ERROR")
+def strategy_exit_alert(
+    strategy: str,
+    reason: str,
+    pnl: float,
+    gross_pnl: float = None,
+    charges: float = None,
+    exit_price: float = None,
+):
+    time_str = _ist_now()
+    gross = gross_pnl if gross_pnl is not None else pnl
+    chg = charges if charges is not None else 0.0
+    net = gross - chg
+    icon = "✅" if net >= 0 else "❌"
+
+    reason_icon_map = {
+        "TARGET": "✅ TARGET HIT",
+        "EXIT_PROFIT": "✅ TARGET HIT",
+        "EXIT_LOSS": "❌ STOP LOSS HIT",
+        "SL_HIT": "❌ STOP LOSS HIT",
+        "EXIT_TIME": "⏰ TIME EXIT (3:15 PM)",
+        "GLOBAL_MTM_HALT": "🚨 EMERGENCY KILL SWITCH",
+        "EXIT_REQUESTED": "🛑 MANUAL EXIT",
+        "PARTIAL_FILL": "⚠️ PARTIAL FILL — SQUARED OFF",
+        "TARGET_1_2": "🎯 1:2 TARGET ACHIEVED",
+    }
+    reason_label = reason_icon_map.get(reason, reason)
+
+    exit_line = f"Exit Price:   ₹{exit_price:.2f}\n" if exit_price else ""
+
+    msg = (
+        f"🏁 [EXIT] — {strategy}\n"
+        f"{'─' * 40}\n"
+        f"Exit Reason:  {reason_label}\n"
+        f"{exit_line}"
+        f"Gross P&L:    ₹{gross:+,.2f}\n"
+        f"Charges:      ₹{chg:,.2f}\n"
+        f"NET P&L:      {icon} ₹{net:+,.2f}\n"
+        f"{'─' * 40}\n"
+        f"🕐 {time_str}"
+    )
+    send_telegram(msg, level="PROFIT" if net >= 0 else "LOSS")
+
+
+# ═══════════════════════════════════════════════════════════
+#  3. HOURLY SUMMARY — account snapshot
+# ═══════════════════════════════════════════════════════════
+
+def hourly_report_alert(
+    active_trades: int = 0,
+    realized_pnl: float = 0.0,
+    unrealized_mtm: float = 0.0,
+    total_charges: float = 0.0,
+    mtm_total: float = 0.0,
+    mtm_limit: float = 10000.0,
+):
+    time_str = _ist_now()
+    total_net = realized_pnl + unrealized_mtm - total_charges
+    pnl_icon = "🟢" if total_net >= 0 else "🔴"
+
+    mtm_remaining = mtm_limit + mtm_total
+    mtm_pct = abs(mtm_total) / mtm_limit * 100 if mtm_limit else 0
+    if mtm_total < -mtm_limit * 0.8:
+        mtm_status = f"🚨 CRITICAL — {mtm_pct:.0f}% of limit used"
+    elif mtm_total < -mtm_limit * 0.5:
+        mtm_status = f"⚠️ WARNING — {mtm_pct:.0f}% of limit used"
+    elif mtm_total < 0:
+        mtm_status = f"⚠️ {mtm_pct:.0f}% of limit used"
+    else:
+        mtm_status = f"✅ Safe (₹{mtm_remaining:+,.2f} remaining)"
+
+    msg = (
+        f"📊 [HOURLY REPORT] — BOT STATUS\n"
+        f"{'─' * 40}\n"
+        f"Status:        🟢 LIVE & SCANNING\n"
+        f"Active Trades: {active_trades}\n"
+        f"{'─' * 40}\n"
+        f"Realized P&L:      ₹{realized_pnl:+,.2f}\n"
+        f"Unrealized MTM:    ₹{unrealized_mtm:+,.2f}\n"
+        f"Est. Charges:      ₹{total_charges:+,.2f}\n"
+        f"{'─' * 40}\n"
+        f"Total Net P&L: {pnl_icon} ₹{total_net:+,.2f}\n"
+        f"{'─' * 40}\n"
+        f"Global MTM Limit:\n"
+        f"  {mtm_status}\n"
+        f"  (Limit: -₹{mtm_limit:,.0f} | Current: ₹{mtm_total:+,.2f})\n"
+        f"{'─' * 40}\n"
+        f"🕐 {time_str}"
+    )
+    send_telegram(msg, level="INFO")
+
+
+# ═══════════════════════════════════════════════════════════
+#  4. CRITICAL / ERROR ALERTS — high-priority emergency
+# ═══════════════════════════════════════════════════════════
+
+def error_alert(context: str, error_msg: str, action_taken: str = ""):
+    time_str = _ist_now()
+    action_line = f"\nAction Taken: {action_taken}" if action_taken else ""
+    msg = (
+        f"🔴 [ERROR] — {context}\n"
+        f"{'─' * 40}\n"
+        f"⚠️  {error_msg}{action_line}\n"
+        f"{'─' * 40}\n"
+        f"🕐 {time_str}"
+    )
+    send_telegram(msg, level="ERROR")
+
+
+def critical_alert(
+    context: str,
+    error_msg: str,
+    action_taken: str = "",
+    is_mtm_breach: bool = False,
+):
+    time_str = _ist_now()
+    banner = "🚨 GLOBAL MTM LIMIT BREACHED 🚨" if is_mtm_breach else "💀 CRITICAL SYSTEM FAILURE 💀"
+    action_line = f"\n🛠 Action Taken: {action_taken}" if action_taken else ""
+    footer = "System halted — manual intervention required." if is_mtm_breach else "Immediate attention required."
+
+    msg = (
+        f"{'⚠️' * 12}\n"
+        f"  {banner}\n"
+        f"{'⚠️' * 12}\n"
+        f"{'─' * 40}\n"
+        f"Component:     {context}\n"
+        f"Error:         🟥 {error_msg}{action_line}\n"
+        f"{'─' * 40}\n"
+        f"🕐 {time_str}\n"
+        f"{'─' * 40}\n"
+        f"{footer}"
+    )
+    send_telegram(msg, level="CRITICAL")
 
 
 # ── Logging handler ───────────────────────────────────────
