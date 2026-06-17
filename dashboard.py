@@ -1422,7 +1422,7 @@ def api_status():
         p = cfg["cs_position"]
         legs_info = [f"{l['action']} {l['tradingsymbol']} @ ?{l['premium']}" for l in p.get("legs", [])]
         positions["cs"] = {"expiry": p["expiry"], "entry_credit": p["net_credit"], "legs": legs_info}
-    if cfg.get("manual_trades"):
+    if running.get("mt") and cfg.get("manual_trades"):
         trades = cfg["manual_trades"]
         if isinstance(trades, dict):
             trades = [trades]
@@ -1598,6 +1598,7 @@ def api_trades():
     live_pnl = None
     live_positions = 0
     running_charges = 0.0
+    actual_open_tsyms: set[str] = set()
     cfg = load_config()
     api_key = cfg.get("api_key", "")
     access_token = cfg.get("access_token", "")
@@ -1610,6 +1611,10 @@ def api_trades():
                 live_pnl += float(p.get("pnl", 0))
                 if int(p.get("quantity", 0)) != 0 and p.get("tradingsymbol"):
                     live_positions += 1
+                    actual_open_tsyms.add(p["tradingsymbol"])
+            for p in all_pos.get("day", []):
+                if int(p.get("quantity", 0)) != 0 and p.get("tradingsymbol"):
+                    actual_open_tsyms.add(p["tradingsymbol"])
 
             # Estimated charges for running positions: use current LTP
             day_positions = all_pos.get("net", [])
@@ -1648,11 +1653,24 @@ def api_trades():
         except Exception:
             pass
 
-    # Running trades from config + dashboard processes
+    # Running trades — cross-reference config with actual open positions
     running = 0
     running_details = []
+
+    # Collect tracked symbols from manual_trades config
+    mt_tsyms: set[str] = set()
+    if cfg.get("manual_trades"):
+        trades = cfg["manual_trades"]
+        if isinstance(trades, dict):
+            trades = [trades]
+        mt_tsyms = {t["tsym"] for t in trades if "tsym" in t}
+
     for key, label in [("position", "IC"), ("cs_position", "CS"), ("manual_trades", "MT")]:
-        if cfg.get(key):
+        if key == "manual_trades":
+            if mt_tsyms and (not actual_open_tsyms or any(t in actual_open_tsyms for t in mt_tsyms)):
+                running += 1
+                running_details.append(label)
+        elif cfg.get(key):
             running += 1
             running_details.append(label)
     for s, proc in bot_processes.items():
