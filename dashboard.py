@@ -770,7 +770,7 @@ PAGE = r"""<!DOCTYPE html>
       {% if has_api_key %}
         <div class="row mb-8">
           <a href="{{ login_url }}" class="btn btn-secondary" id="btn-login" target="_blank">&#128273; Login at Zerodha</a>
-          <span class="text-xs" id="login-status">{{ '&#10003; Logged in' if has_token else '&#10007; Not logged in' }}</span>
+          <span class="text-xs" id="login-status">{{ ('&#10003; Logged in' if has_token else '&#10007; Not logged in')|safe }}</span>
         </div>
         <div class="msg msg-info" id="login-hint" style="display:none;">
           1. Click Login &rarr; authorize on Zerodha<br>
