@@ -11,6 +11,7 @@ Features:
   - Per-strategy Start/Stop with live console output
 """
 
+# ━━━ [1] IMPORTS ━━━
 import json
 import os
 import signal
@@ -28,8 +29,13 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
 
+from ticker_manager import TickerManager
+
+ticker_mgr = TickerManager()
+
 load_dotenv()
 
+# ━━━ [2] CONFIG / CONSTANTS ━━━
 _DASH_API_CALLS: list[float] = []
 
 def _dash_rate_limit():
@@ -50,6 +56,8 @@ LOT_SIZE = 65  # NIFTY lot size for charges estimation
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
+# ━━━ [3] LOGIN PAGE TEMPLATE ━━━
+# This is the full HTML/CSS served at /login
 PASSWORD_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -77,39 +85,39 @@ PASSWORD_PAGE = r"""<!DOCTYPE html>
     position:relative; z-index:1;
     background:rgba(16,20,30,0.8); backdrop-filter:blur(24px);
     border:1px solid rgba(255,255,255,0.08);
-    border-radius:24px; padding:48px 40px;
-    width:420px; max-width:92vw;
+    border-radius:24px; padding:56px 48px;
+    width:600px; max-width:94vw;
     box-shadow:0 24px 80px rgba(0,0,0,0.6);
     transition:transform .3s ease;
   }
   .logo {
-    width:56px; height:56px; border-radius:16px;
+    width:72px; height:72px; border-radius:20px;
     background:linear-gradient(135deg,#5B8DEF,#16C098);
     display:flex; align-items:center; justify-content:center;
-    margin:0 auto 20px; font-size:28px;
+    margin:0 auto 28px; font-size:36px;
     box-shadow:0 8px 28px rgba(91,141,239,0.25);
   }
   h1 {
     font-family:'Sora',sans-serif; font-weight:700;
-    font-size:1.6rem; text-align:center;
+    font-size:2.4rem; text-align:center;
     background:linear-gradient(135deg,#e2e8f0,#94a3b8);
     -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-    background-clip:text; margin-bottom:6px;
+    background-clip:text; margin-bottom:10px;
   }
-  .sub { text-align:center; color:#64748b; font-size:0.9rem; margin-bottom:28px; }
+  .sub { text-align:center; color:#64748b; font-size:1.25rem; margin-bottom:36px; }
   input {
-    width:100%; padding:16px 20px; border-radius:14px;
+    width:100%; padding:20px 26px; border-radius:14px;
     border:1px solid rgba(255,255,255,0.08);
     background:rgba(0,0,0,0.35); color:#e2e8f0;
-    font-size:1rem; font-family:'Inter',sans-serif;
-    margin-bottom:16px; transition:border-color .25s ease, box-shadow .25s ease;
+    font-size:1.3rem; font-family:'Inter',sans-serif;
+    margin-bottom:20px; transition:border-color .25s ease, box-shadow .25s ease;
     outline:none;
   }
   input:focus { border-color:#5B8DEF; box-shadow:0 0 0 3px rgba(91,141,239,0.15); }
   input::placeholder { color:#475569; }
   .btn {
-    width:100%; padding:16px; border:none; border-radius:14px;
-    font-size:1rem; font-weight:600; font-family:'Inter',sans-serif;
+    width:100%; padding:20px; border:none; border-radius:14px;
+    font-size:1.3rem; font-weight:600; font-family:'Inter',sans-serif;
     cursor:pointer;
     background:linear-gradient(135deg,#5B8DEF,#16C098);
     color:#fff; transition:transform .2s ease, box-shadow .2s ease;
@@ -118,9 +126,9 @@ PASSWORD_PAGE = r"""<!DOCTYPE html>
   .btn:hover { transform:translateY(-1px); box-shadow:0 6px 24px rgba(91,141,239,0.35); }
   .btn:active { transform:translateY(0); }
   .error {
-    text-align:center; margin-top:16px; font-size:0.9rem;
+    text-align:center; margin-top:20px; font-size:1.1rem;
     color:#f87171; background:rgba(248,113,113,0.1);
-    padding:10px 16px; border-radius:10px;
+    padding:14px 20px; border-radius:10px;
   }
 </style>
 </head>
@@ -139,6 +147,7 @@ PASSWORD_PAGE = r"""<!DOCTYPE html>
 </html>"""
 
 
+# ━━━ [5a] Helper functions ━━━
 def get_dashboard_password() -> str:
     return os.environ.get("DASHBOARD_PASSWORD", "") or load_config().get("dashboard_password", "")
 
@@ -192,6 +201,17 @@ STRATEGY_LABELS = {
     "sc_sensex": "3-Min Scalper (SENSEX)",
 }
 
+# ━━━ [4] MAIN DASHBOARD TEMPLATE ━━━
+# Sub-sections within PAGE:
+#   4a — CSS styles
+#   4b — HTML: top status bar
+#   4c — HTML: market data grid
+#   4d — HTML: today's summary + charges breakdown popup
+#   4e — HTML: strategy cards
+#   4f — HTML: manual token / footer
+#   4g — JavaScript
+
+# ━━━ [4] MAIN DASHBOARD TEMPLATE ━━━
 PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -202,6 +222,7 @@ PAGE = r"""<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- [4a] CSS styles -->
 <style>
   :root, html[data-theme="terminal"] {
     --bg:#080c17;
@@ -371,7 +392,9 @@ PAGE = r"""<!DOCTYPE html>
     transition:transform .2s ease, border-color .2s ease;
   }
   .mkt-card:hover { transform:translateY(-2px); border-color:var(--border); }
-  .mkt-label { font-size:0.65rem; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim); margin-bottom:4px; }
+  .mkt-label-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }
+  .mkt-label { font-size:0.65rem; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim); }
+  .mkt-iv { font-size:0.6rem; font-weight:600; color:var(--amber); letter-spacing:0.04em; }
   .mkt-spot { font-family:'Sora',sans-serif; font-size:1.4rem; font-weight:700; }
   .mkt-spot.green { color:var(--green); } .mkt-spot.red { color:var(--red); } .mkt-spot.blue { color:var(--accent); }
   .mkt-chg { font-size:0.95rem; font-weight:600; margin-top:2px; }
@@ -466,6 +489,34 @@ PAGE = r"""<!DOCTYPE html>
     line-height:1.6; color:var(--text-dim);
   }
   .mini-log .hl { color:var(--text); }
+
+  /* ── CHARGES BREAKDOWN ── */
+  .bd-toggle { font-size:0.5rem; margin-left:2px; opacity:0.5; }
+  .sum-item:hover .bd-toggle { opacity:1; }
+  .bd-overlay { position:fixed; inset:0; z-index:999; background:rgba(0,0,0,0.5); }
+  .bd-popover {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    z-index:1000; background:var(--card-bg); border:1px solid var(--card-border);
+    border-radius:16px; padding:28px 32px; min-width:340px;
+    box-shadow:0 24px 80px rgba(0,0,0,0.5);
+    backdrop-filter:blur(20px);
+  }
+  .bd-close {
+    position:absolute; top:12px; right:16px; cursor:pointer;
+    font-size:1.5rem; color:var(--text-dim); line-height:1;
+  }
+  .bd-close:hover { color:var(--text); }
+  .bd-title {
+    font-family:'Sora',sans-serif; font-weight:700; font-size:1rem;
+    margin-bottom:16px; color:var(--text-dim); text-transform:uppercase;
+    letter-spacing:0.06em;
+  }
+  .bd-table { width:100%; border-collapse:collapse; }
+  .bd-table td { padding:8px 0; font-size:0.9rem; border-bottom:1px solid var(--card-border); }
+  .bd-table tr:last-child td { border-bottom:none; }
+  .bd-val { text-align:right; font-weight:600; font-variant-numeric:tabular-nums; }
+  .bd-total td { font-weight:700; padding-top:12px; border-top:2px solid var(--border); color:var(--red); }
+  .bd-total .bd-val { font-size:1.05rem; }
 
   /* ── BUTTONS ── */
   .btn {
@@ -603,37 +654,38 @@ PAGE = r"""<!DOCTYPE html>
     {% endif %}
   {% endfor %}
 
-  <!-- TOP STATUS BAR -->
+  <!-- [4b] Top status bar -->
   <div class="card" style="padding:16px 20px;">
     <div class="status-row">
       <div class="stat-pill"><span class="sp-label">Heartbeat</span><span class="sp-value" id="s-heartbeat">---</span></div>
       <div class="stat-pill"><span class="sp-label">Token</span><span class="sp-value" id="s-token">---</span></div>
       <div class="stat-pill"><span class="sp-label">Strategies</span><span class="sp-value blue" id="s-count">0/10</span><span class="sp-mini" id="s-running-list"></span></div>
+      <button class="btn btn-danger" id="btn-kill" onclick="killSwitch()" style="padding:6px 14px;font-size:0.75rem;">&#9762; KILL ALL</button>
     </div>
   </div>
 
-  <!-- MARKET DATA -->
+  <!-- [4c] Market data grid -->
   <div class="card">
     <div class="card-header">
       <div class="card-title">&#128200; Market Data <span class="badge" id="market-time">---</span></div>
     </div>
     <div class="mkt-grid">
       <div class="mkt-card">
-        <div class="mkt-label">NIFTY 50</div>
+        <div class="mkt-label-row"><span class="mkt-label">NIFTY 50</span><span class="mkt-iv" id="m-nifty-iv"></span></div>
         <div class="mkt-spot blue" id="m-nifty-spot">---</div>
         <div class="mkt-chg" id="m-nifty-chg"></div>
         <div class="mkt-ohl">O: <span id="m-nifty-open"></span> &middot; H: <span id="m-nifty-high"></span> &middot; L: <span id="m-nifty-low"></span></div>
         <div class="mkt-range">&#8646; Range: <span id="m-nifty-range"></span></div>
       </div>
       <div class="mkt-card">
-        <div class="mkt-label">SENSEX</div>
+        <div class="mkt-label-row"><span class="mkt-label">SENSEX</span><span class="mkt-iv" id="m-sensex-iv"></span></div>
         <div class="mkt-spot blue" id="m-sensex-spot">---</div>
         <div class="mkt-chg" id="m-sensex-chg"></div>
         <div class="mkt-ohl">O: <span id="m-sensex-open"></span> &middot; H: <span id="m-sensex-high"></span> &middot; L: <span id="m-sensex-low"></span></div>
         <div class="mkt-range">&#8646; Range: <span id="m-sensex-range"></span></div>
       </div>
       <div class="mkt-card">
-        <div class="mkt-label">BANK NIFTY</div>
+        <div class="mkt-label-row"><span class="mkt-label">BANK NIFTY</span><span class="mkt-iv" id="m-banknifty-iv"></span></div>
         <div class="mkt-spot blue" id="m-banknifty-spot">---</div>
         <div class="mkt-chg" id="m-banknifty-chg"></div>
         <div class="mkt-ohl">O: <span id="m-banknifty-open"></span> &middot; H: <span id="m-banknifty-high"></span> &middot; L: <span id="m-banknifty-low"></span></div>
@@ -648,7 +700,7 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- TODAY'S SUMMARY -->
+  <!-- [4d] Today's summary + charges breakdown -->
   <div class="card">
     <div class="card-header">
       <div class="card-title">&#128202; Today's Summary <span class="badge" id="trade-date"></span></div>
@@ -674,13 +726,13 @@ PAGE = r"""<!DOCTYPE html>
         <div class="sum-value" id="td-live-pnl">&#8377;0</div>
         <div class="sum-sub" id="td-live-pos"></div>
       </div>
-      <div class="sum-item">
-        <div class="sum-label">Est. Charges</div>
+      <div class="sum-item" style="cursor:pointer;" onclick="toggleBreakdown('running')">
+        <div class="sum-label">Est. Charges <span class="bd-toggle">&#9660;</span></div>
         <div class="sum-value red" id="td-chg-running">&#8377;0</div>
         <div class="sum-sub">open @ LTP</div>
       </div>
-      <div class="sum-item">
-        <div class="sum-label">Actual Charges</div>
+      <div class="sum-item" style="cursor:pointer;" onclick="toggleBreakdown('closed')">
+        <div class="sum-label">Actual Charges <span class="bd-toggle">&#9660;</span></div>
         <div class="sum-value red" id="td-chg-closed">&#8377;0</div>
         <div class="sum-sub">fill price</div>
       </div>
@@ -692,7 +744,23 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- STRATEGY CARDS -->
+  <!-- [4d2] Charges breakdown popover (overlay + modal) -->
+  <div class="bd-popover" id="bd-popover" style="display:none;" onclick="event.stopPropagation()">
+    <div class="bd-close" onclick="closeBreakdown()">&times;</div>
+    <div class="bd-title" id="bd-title">Charge Breakdown</div>
+    <table class="bd-table">
+      <tr><td>Brokerage Charges</td><td class="bd-val" id="bd-brokerage">&#8377;0</td></tr>
+      <tr><td>STT</td><td class="bd-val" id="bd-stt">&#8377;0</td></tr>
+      <tr><td>Exchange transaction charges</td><td class="bd-val" id="bd-txn">&#8377;0</td></tr>
+      <tr><td>GST</td><td class="bd-val" id="bd-gst">&#8377;0</td></tr>
+      <tr><td>Stamp Duty</td><td class="bd-val" id="bd-stamp">&#8377;0</td></tr>
+      <tr><td>SEBI Turnover fee</td><td class="bd-val" id="bd-sebi">&#8377;0</td></tr>
+      <tr class="bd-total"><td>Total Charges</td><td class="bd-val" id="bd-total">&#8377;0</td></tr>
+    </table>
+  </div>
+  <div class="bd-overlay" id="bd-overlay" style="display:none;" onclick="closeBreakdown()"></div>
+
+  <!-- [4e] Strategy cards -->
   <div class="strat-grid" id="strat-grid">
     {% for sid in ['ic','cs','sma','mt','bnf','n1h','sw','sr','ratio'] %}
     <div class="strat" id="strat-{{ sid }}">
@@ -797,7 +865,9 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 
 </div>
+<!-- [4f] HTML: settings / token form / end of body -->
 
+<!-- [4g] JavaScript - all client-side logic -->
 <script>
 function $(id){return document.getElementById(id)}
 const C={green:'#16C098',red:'#FF5C72',amber:'#F5A623',blue:'#5B8DEF',deepRed:'#E0344C'};
@@ -903,11 +973,24 @@ async function fetchLogs(){
 }
 setInterval(fetchLogs,5000);fetchLogs();
 
+// ── KILL SWITCH ──
+async function killSwitch(){
+  if(!confirm('KILL ALL running strategies and clear saved positions?'))return;
+  try{
+    const r=await(await fetch('/api/kill_switch',{method:'POST'})).json();
+    if(r.ok){
+      await fetchStatus();
+      await fetchTrades();
+    }
+  }catch(e){}
+}
+
 // ── MARKET ──
 async function fetchMarket(){
   try{
     const d=await(await fetch('/api/market')).json();
     if(d.error)return;
+    console.log('market data:',JSON.stringify(d).slice(0,500));
     for(const [prefix,key] of [['nifty','nifty'],['sensex','sensex'],['banknifty','banknifty']]){
       const v=d[key];if(!v)continue;
       const spotEl=$('m-'+prefix+'-spot');
@@ -919,6 +1002,11 @@ async function fetchMarket(){
       $('m-'+prefix+'-high').textContent=v.high.toLocaleString('en-IN',{minimumFractionDigits:2});
       $('m-'+prefix+'-low').textContent=v.low.toLocaleString('en-IN',{minimumFractionDigits:2});
       $('m-'+prefix+'-range').textContent=(v.high-v.low).toLocaleString('en-IN',{minimumFractionDigits:2})+' pts';
+      const ivEl=$('m-'+prefix+'-iv');
+      if(v.iv!==undefined&&v.iv!==null){ivEl.textContent='IV: '+v.iv+'%';}
+      else{
+        ivEl.textContent='--';
+      }
     }
     if(d.pcr){
       $('m-pcr').textContent=d.pcr.toFixed(2);
@@ -940,10 +1028,12 @@ async function fetchMarket(){
 setInterval(fetchMarket,15000);fetchMarket();
 
 // ── TRADES ──
+var _lastTradeData=null;
 async function fetchTrades(){
   try{
     const d=await(await fetch('/api/trades')).json();
     if(d.error)return;
+    _lastTradeData=d;
     $('trade-date').textContent=d.date;
     $('td-running').textContent=d.running_trades;
     $('td-running-list').textContent=d.running_details.join(', ')||'none';
@@ -966,6 +1056,39 @@ async function fetchTrades(){
   }catch(e){}
 }
 setInterval(fetchTrades,10000);fetchTrades();
+
+// ── CHARGES BREAKDOWN ──
+function renderBreakdown(bd,title){
+  $('bd-title').textContent=title;
+  const set=(id,val)=>{const el=$('bd-'+id);if(el)el.textContent='\u20B9'+(val||0).toLocaleString('en-IN',{minimumFractionDigits:2});};
+  set('brokerage',bd.brokerage);
+  set('stt',bd.stt);
+  set('txn',bd.transaction_charge);
+  set('gst',bd.gst);
+  set('stamp',bd.stamp_duty);
+  set('sebi',bd.sebi);
+  set('total',bd.total);
+}
+function toggleBreakdown(type){
+  if(!_lastTradeData)return;
+  const pop=$('bd-popover'),ov=$('bd-overlay');
+  const isOpen=pop.style.display==='block';
+  if(isOpen && pop._bdType===type){closeBreakdown();return;}
+  const bd=type==='closed'?_lastTradeData.closed_breakdown:_lastTradeData.running_breakdown;
+  const label=type==='closed'?'Actual Charges (fill price)':'Estimated Charges (LTP)';
+  if(!bd||!bd.total){return;}
+  renderBreakdown(bd,label);
+  pop.style.display='block';ov.style.display='block';
+  pop._bdType=type;
+}
+function closeBreakdown(){
+  $('bd-popover').style.display='none';
+  $('bd-overlay').style.display='none';
+}
+document.addEventListener('click',function(e){
+  if(e.target.closest('.bd-popover')||e.target.closest('.sum-item'))return;
+  closeBreakdown();
+});
 
 // ── MT SCAN ──
 var mtPositions=[];
@@ -1023,6 +1146,7 @@ document.querySelectorAll('.msg-success,.msg-error').forEach(m=>setTimeout(()=>m
 </html>"""
 
 
+# ━━━ [5b] Routes: /login, /logout, / ━━━
 @app.route("/login", methods=["POST"])
 def login():
     pw = get_dashboard_password()
@@ -1060,6 +1184,7 @@ def home():
     )
 
 
+# ━━━ [5c] Routes: /callback, /api/token ━━━
 @app.route("/callback")
 @require_auth
 def callback():
@@ -1104,6 +1229,7 @@ def api_token():
         return redirect(f"/?msg=error:Token exchange failed: {e}")
 
 
+# ━━━ [5d] Routes: /api/start, /api/stop ━━━
 @app.route("/api/start", methods=["POST"])
 @require_auth
 def api_start():
@@ -1179,6 +1305,37 @@ def api_stop():
     return jsonify({"ok": True, "strategy": strategy})
 
 
+# ━━━ [5d2] Route: /api/kill_switch ━━━
+@app.route("/api/kill_switch", methods=["POST"])
+@require_auth
+def api_kill_switch():
+    """Kill ALL running strategies."""
+    killed = []
+    for s in list(STRATEGIES):
+        proc = bot_processes.get(s)
+        if proc and proc.poll() is None:
+            try:
+                if os.name == "nt":
+                    proc.terminate()
+                else:
+                    os.kill(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+            bot_processes[s] = None
+            killed.append(s.upper())
+    cfg = load_config()
+    for key in ("position", "cs_position", "manual_trades"):
+        cfg.pop(key, None)
+    save_config(cfg)
+    return jsonify({"ok": True, "killed": killed})
+
+
+# ━━━ [5e] Routes: /api/mt-scan, /api/mt-start, /api/mt-add ━━━
 @app.route("/api/mt-scan", methods=["POST"])
 @require_auth
 def api_mt_scan():
@@ -1345,6 +1502,7 @@ def api_mt_add():
     return jsonify({"ok": True, "count": len(trades)})
 
 
+# ━━━ [5f] Routes: /api/status, /api/log ━━━
 @app.route("/api/status")
 @require_auth
 def api_status():
@@ -1418,8 +1576,9 @@ def api_log():
     return jsonify({"output": out[-100:]})
 
 
-def calc_charges(legs: list, lot_size: int, exchange: str = "NFO") -> float:
-    """Mirror of iron_condor_algo's calc_charges for dashboard estimates."""
+# ━━━ [5g] Charges calculation functions ━━━
+def calc_charges_breakdown(legs: list, lot_size: int, exchange: str = "NFO") -> dict:
+    """Zerodha charges breakdown for a set of legs. Returns dict with each component."""
     orders = len(legs) * 2
     brokerage = orders * 20.0
     total_prem_turnover = 0.0
@@ -1438,11 +1597,33 @@ def calc_charges(legs: list, lot_size: int, exchange: str = "NFO") -> float:
     sebi = turnover_cr * 10.0
     stamp = total_prem_turnover * 0.00003
     gst = (brokerage + trans_charge + sebi) * 0.18
-    return round(brokerage + stt + trans_charge + sebi + stamp + gst, 2)
+    return {
+        "brokerage": round(brokerage, 2),
+        "stt": round(stt, 2),
+        "transaction_charge": round(trans_charge, 2),
+        "gst": round(gst, 2),
+        "stamp_duty": round(stamp, 2),
+        "sebi": round(sebi, 2),
+        "total": round(brokerage + stt + trans_charge + sebi + stamp + gst, 2),
+        "orders": orders,
+        "total_prem_turnover": round(total_prem_turnover, 2),
+    }
+
+def _merge_breakdown(bd_list: list[dict]) -> dict:
+    """Merge multiple breakdown dicts into one total."""
+    keys = ["brokerage", "stt", "transaction_charge", "gst", "stamp_duty", "sebi", "total"]
+    merged = {k: 0.0 for k in keys}
+    for bd in bd_list:
+        for k in keys:
+            merged[k] += bd.get(k, 0)
+    merged["orders"] = sum(bd.get("orders", 0) for bd in bd_list)
+    merged["total_prem_turnover"] = sum(bd.get("total_prem_turnover", 0) for bd in bd_list)
+    return {k: round(v, 2) for k, v in merged.items()}
 
 
 _market_cache = {"data": None, "time": 0}
 
+# ━━━ [5h] Market data helpers ━━━
 def classify_pcr(pcr: float, price_change_pct: float = 0) -> str:
     if pcr >= 1.30:
         return "STRONG BULLISH"
@@ -1483,8 +1664,9 @@ def fetch_market_data(kite: KiteConnect) -> dict:
                 "low": round(ohlc.get("low", 0), 2),
                 "change": round(net_chg, 2),
                 "change_pct": round(chg_pct, 2),
+                "iv": None,
             }
-        # PCR / Sentiment
+        # PCR / Sentiment (NIFTY only)
         resp = kite.instruments("NFO")
         nifty_opts = [r for r in resp if r.get("name") == "NIFTY" and r.get("instrument_type") in ("CE", "PE")]
         if nifty_opts:
@@ -1511,12 +1693,46 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             result["pcr"] = round(pcr, 4)
             nifty_chg = result.get("nifty", {}).get("change_pct", 0)
             result["sentiment"] = classify_pcr(pcr, nifty_chg)
+        # ━━━ Ticker: find ATM CE tokens & subscribe ━━━
+        atm_tokens = {}
+        for idx_name, exchange, name, step in [
+            ("nifty", "NFO", "NIFTY", 50),
+            ("banknifty", "NFO", "BANKNIFTY", 100),
+            ("sensex", "BFO", "SENSEX", 100),
+        ]:
+            spot = result.get(idx_name, {}).get("spot", 0)
+            if not spot:
+                continue
+            atm_strike = round(spot / step) * step
+            if exchange == "NFO":
+                insts = [r for r in resp if r.get("name") == name and r.get("instrument_type") == "CE"]
+            else:
+                try:
+                    insts = kite.instruments("BFO")
+                    insts = [r for r in insts if r.get("name") == "SENSEX" and r.get("instrument_type") == "CE"]
+                except Exception:
+                    insts = []
+            for r in insts:
+                try:
+                    if float(r.get("strike", 0)) == atm_strike:
+                        atm_tokens[idx_name] = r.get("instrument_token")
+                        break
+                except (TypeError, ValueError):
+                    continue
+        ticker_mgr.configure(kite.api_key, kite.access_token)
+        ticker_mgr.start()
+        ticker_mgr.update_subscriptions(atm_tokens)
+        for idx in ("nifty", "sensex", "banknifty"):
+            iv = ticker_mgr.get_iv(idx)
+            if iv is not None:
+                result[idx]["iv"] = iv
         result["time"] = datetime.now().strftime("%H:%M:%S")
     except Exception:
         pass
     return result
 
 
+# ━━━ [5i] Routes: /api/market, /api/trades ━━━
 @app.route("/api/market")
 @require_auth
 def api_market():
@@ -1568,8 +1784,8 @@ def api_trades():
     live_pnl = None
     live_positions = 0
     realized_pnl = None  # Actual realized P&L from Zerodha day positions
-    realized_charges = 0.0
-    running_charges = 0.0
+    realized_breakdowns: list[dict] = []
+    running_breakdowns: list[dict] = []
     actual_open_tsyms: set[str] = set()
     cfg = load_config()
     api_key = cfg.get("api_key", "")
@@ -1598,7 +1814,7 @@ def api_trades():
                         zerodha_closed_count += 1
             if abs(zerodha_realized) > 0.01:
                 realized_pnl = zerodha_realized
-                # Estimate charges from actual fill amounts
+                # Calculate charges from actual fill amounts
                 for p in all_pos.get("day", []):
                     if int(p.get("quantity", 0)) == 0:
                         buy_amt = float(p.get("buy_amount", 0))
@@ -1611,9 +1827,9 @@ def api_trades():
                             side = "BUY" if buy_qty > sell_qty else "SELL"
                             premium = avg_buy if side == "BUY" else avg_sell
                             qty = abs(buy_qty - sell_qty)
-                            realized_charges += calc_charges([{"action": side, "premium": premium}], qty)
+                            realized_breakdowns.append(calc_charges_breakdown([{"action": side, "premium": premium}], qty))
 
-            # Estimated charges for running positions: use current LTP
+            # Charges for running positions: use current LTP
             day_positions = all_pos.get("net", [])
             if day_positions:
                 # Group positions by exchange for batch quoting
@@ -1623,9 +1839,12 @@ def api_trades():
                         continue
                     ex = p.get("exchange", "NFO")
                     by_exchange.setdefault(ex, []).append(p)
-                running_legs = []
+                running_legs_by_exchange: dict[str, list] = {}
                 for ex, pos_list in by_exchange.items():
-                    tsyms = [f"{ex}:{p['tradingsymbol']}" for p in pos_list]
+                    open_positions = [p for p in pos_list if int(p.get("quantity", 0)) != 0]
+                    if not open_positions:
+                        continue
+                    tsyms = [f"{ex}:{p['tradingsymbol']}" for p in open_positions]
                     for i in range(0, len(tsyms), 500):
                         batch = tsyms[i:i+500]
                         try:
@@ -1636,16 +1855,19 @@ def api_trades():
                                     sym = full_sym[len(prefix):]
                                 else:
                                     sym = full_sym
-                                matches = [p for p in pos_list if p["tradingsymbol"] == sym]
+                                matches = [p for p in open_positions if p["tradingsymbol"] == sym]
                                 if matches:
                                     p = matches[0]
                                     action = "BUY" if int(p.get("quantity", 0)) > 0 else "SELL"
                                     prem = q.get("last_price", 0)
-                                    running_legs.append({"action": action, "premium": prem})
+                                    running_legs_by_exchange.setdefault(ex, []).append({"action": action, "premium": prem})
                         except Exception:
                             pass
-                if running_legs:
-                    running_charges = calc_charges(running_legs, LOT_SIZE)
+                for ex, legs in running_legs_by_exchange.items():
+                    # Determine lot size from first position for this exchange
+                    ls = LOT_SIZE  # default
+                    if legs:
+                        running_breakdowns.append(calc_charges_breakdown(legs, ls, ex))
 
         except Exception:
             pass
@@ -1693,13 +1915,17 @@ def api_trades():
     # Use Zerodha realized P&L as primary (more accurate), fallback to trade_log.csv
     if realized_pnl is not None:
         display_pnl = round(realized_pnl, 2)
-        display_charges = round(realized_charges, 2)
-        display_closed = zerodha_closed_count  # # closed trades = positions no longer open
+        closed_breakdown = _merge_breakdown(realized_breakdowns) if realized_breakdowns else {}
+        display_charges = closed_breakdown.get("total", 0)
+        display_closed = zerodha_closed_count
     else:
         display_pnl = round(closed["pnl"], 2)
-        display_charges = round(closed["charges"], 2)
+        closed_breakdown = {}
+        display_charges = closed["charges"]
         display_closed = closed["total"]
 
+    running_breakdown = _merge_breakdown(running_breakdowns) if running_breakdowns else {}
+    running_charges = running_breakdown.get("total", 0)
     total_charges = round(display_charges + running_charges, 2)
 
     return jsonify({
@@ -1708,7 +1934,9 @@ def api_trades():
         "closed_pnl": display_pnl,
         "by_strategy": closed["by_strategy"],
         "actual_charges_closed": display_charges,
+        "closed_breakdown": closed_breakdown,
         "est_charges_running": round(running_charges, 2),
+        "running_breakdown": running_breakdown,
         "total_charges": total_charges,
         "running_trades": running,
         "running_details": running_details,
@@ -1717,6 +1945,7 @@ def api_trades():
     })
 
 
+# ━━━ [5j] Routes: /api/config (GET, POST) ━━━
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
     cfg = load_config()
@@ -1742,6 +1971,7 @@ def api_config_post():
 
 
 
+# ━━━ [5k] Main entry point ━━━
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     host = os.environ.get("HOST", "0.0.0.0")
