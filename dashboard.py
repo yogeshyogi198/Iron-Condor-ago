@@ -256,7 +256,7 @@ PAGE = r"""<!DOCTYPE html>
   }
 
   * { margin:0; padding:0; box-sizing:border-box; }
-  html { font-size:16px; }
+  html { font-size:21px; }
 
   body {
     font-family:'Inter',-apple-system,'Segoe UI',sans-serif;
@@ -266,7 +266,7 @@ PAGE = r"""<!DOCTYPE html>
   }
   body::before { content:''; position:fixed; inset:0; z-index:-1; background:var(--mesh1),var(--mesh2); }
 
-  .container { max-width:1440px; margin:0 auto; }
+  .container { margin:0 24px; }
 
   /* ── HERO ── */
   .hero {
@@ -395,7 +395,7 @@ PAGE = r"""<!DOCTYPE html>
   .sum-value.green { color:var(--green); } .sum-value.red { color:var(--red); } .sum-value.blue { color:var(--accent); }
 
   /* ── STRATEGY CARDS ── */
-  .strat-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(310px,1fr)); gap:18px; }
+  .strat-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:18px; }
   .strat {
     background:var(--card-bg); backdrop-filter:blur(20px);
     border:1px solid var(--card-border);
@@ -570,6 +570,7 @@ PAGE = r"""<!DOCTYPE html>
     *,*::before,*::after { animation-duration:0s!important; transition-duration:0s!important; }
     .strat:hover, .btn:hover { transform:none!important; }
   }
+  .powered-by { text-align:center; font-size:1.1rem; font-weight:600; opacity:0.35; color:var(--text); letter-spacing:1px; margin-top:2px; }
 </style>
 </head>
 <body>
@@ -581,6 +582,7 @@ PAGE = r"""<!DOCTYPE html>
       <div class="hero-title">
         <h1>Dashboard</h1>
         <div class="hero-sub">Multi-strategy execution console</div>
+      <div class="powered-by">Powered by YOGI</div>
       </div>
     </div>
     <div class="hero-actions">
