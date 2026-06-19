@@ -85,15 +85,20 @@ class TickerManager:
             at = self._access_token
         ws = KiteTicker(ak, at)
 
+        _logged_tokens = set()
+
         def on_ticks(ws, ticks):
             with self._lock:
                 for tick in ticks:
                     token = tick.get("instrument_token")
                     if token in self._token_to_index:
                         iv = tick.get("implied_volatility")
+                        idx = self._token_to_index[token]
+                        if token not in _logged_tokens:
+                            print(f"[ticker] first tick token={token} idx={idx} iv={iv} tick_keys={list(tick.keys())}")
+                            _logged_tokens.add(token)
                         if iv is not None:
                             try:
-                                idx = self._token_to_index[token]
                                 self.iv_data[idx] = round(float(iv) * 100, 2)
                             except (TypeError, ValueError):
                                 pass
