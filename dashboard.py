@@ -13,6 +13,7 @@ Features:
 
 # ━━━ [1] IMPORTS ━━━
 import json
+import logging
 import os
 import signal
 import secrets
@@ -30,6 +31,10 @@ from flask import Flask, jsonify, redirect, render_template_string, request, ses
 from kiteconnect import KiteConnect
 
 from ticker_manager import TickerManager
+
+logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
+logger = logging.getLogger("dashboard")
+
 ticker_mgr = TickerManager()
 _ticker_initialized = False
 
@@ -39,8 +44,10 @@ def init_ticker_once(kite: KiteConnect):
     global _ticker_initialized
     if _ticker_initialized:
         return
+    print("[ticker] Initializing WebSocket ticker for IV streaming...")
     try:
         resp = kite.instruments("NFO")
+        print(f"[ticker] Got {len(resp)} NFO instruments")
         atm_tokens = {}
         index_map = [
             ("nifty", "NFO", "NIFTY", 50, "NSE:NIFTY 50"),
@@ -48,9 +55,11 @@ def init_ticker_once(kite: KiteConnect):
             ("sensex", "BFO", "SENSEX", 100, "BSE:SENSEX"),
         ]
         for idx_name, exchange, name, step, sym in index_map:
-            q = kite.quote(sym).get(sym, {})
-            spot = q.get("last_price", 0)
+            q = kite.quote(sym)
+            spot_data = q.get(sym, {})
+            spot = spot_data.get("last_price", 0)
             if not spot:
+                print(f"[ticker] Skipping {idx_name}: spot={spot}")
                 continue
             atm_strike = round(spot / step) * step
             if exchange == "NFO":
@@ -59,7 +68,8 @@ def init_ticker_once(kite: KiteConnect):
                 try:
                     insts = kite.instruments("BFO")
                     insts = [r for r in insts if r.get("name") == "SENSEX" and r.get("instrument_type") == "CE"]
-                except Exception:
+                except Exception as e:
+                    print(f"[ticker] BFO instruments error: {e}")
                     insts = []
             best_token = None
             best_diff = float("inf")
@@ -76,12 +86,17 @@ def init_ticker_once(kite: KiteConnect):
                     continue
             if best_token is not None:
                 atm_tokens[idx_name] = best_token
+                print(f"[ticker] {idx_name} ATM token={best_token} strike={atm_strike} spot={spot}")
+            else:
+                print(f"[ticker] {idx_name} no token found for atm_strike={atm_strike}")
+        print(f"[ticker] Subscribing to tokens: {atm_tokens}")
         ticker_mgr.configure(kite.api_key, kite.access_token)
         ticker_mgr.update_subscriptions(atm_tokens)
         ticker_mgr.start()
         _ticker_initialized = True
-    except Exception:
-        pass
+        print("[ticker] WebSocket ticker started")
+    except Exception as e:
+        print(f"[ticker] init error: {e}")
 
 
 load_dotenv()
@@ -1041,7 +1056,7 @@ async function fetchMarket(){
   try{
     const d=await(await fetch('/api/market')).json();
     if(d.error)return;
-    console.log('market data:',JSON.stringify(d).slice(0,500));
+    if(d._ticker)console.log('ticker status:',JSON.stringify(d._ticker));
     for(const [prefix,key] of [['nifty','nifty'],['sensex','sensex'],['banknifty','banknifty']]){
       const v=d[key];if(!v)continue;
       const spotEl=$('m-'+prefix+'-spot');
@@ -1749,6 +1764,11 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             iv = ticker_mgr.get_iv(idx)
             if iv is not None:
                 result[idx]["iv"] = iv
+        result["_ticker"] = {
+            "connected": ticker_mgr.is_connected(),
+            "initialized": _ticker_initialized,
+            "iv_keys": list(ticker_mgr.iv_data.keys()) if hasattr(ticker_mgr, "iv_data") else [],
+        }
         result["time"] = datetime.now().strftime("%H:%M:%S")
     except Exception:
         pass
