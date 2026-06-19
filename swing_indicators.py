@@ -52,83 +52,136 @@ def rsi(close: pd.Series, period: int = 9) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-# ── Confirmation 1: HMA Setup ─────────────────────────────
+# ── Heikin Ashi ────────────────────────────────────────────
 
-def check_hma_setup(df: pd.DataFrame) -> bool:
-    if len(df) < HMA_SLOW + 5:
+def compute_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    ha = pd.DataFrame(index=df.index)
+    ha["HA_Close"] = (df["open"] + df["high"] + df["low"] + df["close"]) / 4.0
+
+    ha_open = np.empty(len(df))
+    ha_open[0] = (df["open"].iloc[0] + df["close"].iloc[0]) / 2.0
+    for i in range(1, len(df)):
+        ha_open[i] = (ha_open[i - 1] + ha["HA_Close"].iloc[i - 1]) / 2.0
+    ha["HA_Open"] = ha_open
+
+    ha["HA_High"] = np.maximum(
+        df["high"].values,
+        np.maximum(ha["HA_Open"].values, ha["HA_Close"].values),
+    )
+    ha["HA_Low"] = np.minimum(
+        df["low"].values,
+        np.minimum(ha["HA_Open"].values, ha["HA_Close"].values),
+    )
+    return ha
+
+
+# ── Entry confirmation: Setup A, Setup B + overall filters ──
+
+def all_confirmations(
+    weekly_df: pd.DataFrame,
+    daily_data: list | None = None,
+    market_cap: float = float("inf"),
+) -> bool:
+    """(Setup A OR Setup B) AND all overall filters must pass."""
+    if len(weekly_df) < MIN_WEEKLY_BARS:
         return False
-    hma_fast = hma(df["close"], HMA_FAST)
-    hma_slow = hma(df["close"], HMA_SLOW)
-    curr_close = df["close"].iloc[-1]
-    prev_close = df["close"].iloc[-2]
-    curr_hma_fast = hma_fast.iloc[-1]
-    prev_hma_fast = hma_fast.iloc[-2]
-    curr_hma_slow = hma_slow.iloc[-1]
-    if pd.isna(curr_hma_fast) or pd.isna(curr_hma_slow):
+
+    ha = compute_heikin_ashi(weekly_df)
+    ha_close = ha["HA_Close"]
+    ha_open = ha["HA_Open"]
+
+    # ── MACD(3,21,9) — used in Setup A + overall filters ──
+    macd_line_a, signal_line_a, hist_a = macd(
+        weekly_df["close"], MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    )
+
+    # ── MACD(3,11,9) — used in Setup B ──
+    macd_line_b, signal_line_b, _ = macd(
+        weekly_df["close"], MACD_B_FAST, MACD_B_SLOW, MACD_B_SIGNAL,
+    )
+
+    # ── Shared HMA / rolling calculations ──
+    hma_ha_30 = hma(ha_close, 30)
+    hma_ha_44 = hma(ha_close, 44)
+    min_12_ha = ha_close.rolling(12).min()
+    hma_min_12 = hma(min_12_ha, 30)
+
+    # ═══════════════════════════════════════════════════════
+    # Setup A — all must be true
+    # ═══════════════════════════════════════════════════════
+    setup_a = (
+        macd_line_a.iloc[-1] >= signal_line_a.iloc[-1]
+        and ha_close.iloc[-2] <= hma_ha_30.iloc[-2]
+        and ha_close.iloc[-1] > hma_ha_30.iloc[-1]
+        and ha_close.iloc[-2] < hma_min_12.iloc[-2]
+    )
+
+    # ═══════════════════════════════════════════════════════
+    # Setup B — all must be true
+    # ═══════════════════════════════════════════════════════
+    max_7_hist = hist_a.rolling(7).max()
+
+    setup_b = (
+        ha_close.iloc[-1] >= hma_ha_44.iloc[-1]
+        and ha_close.iloc[-2] < hma_min_12.iloc[-2]
+        and macd_line_b.iloc[-2] <= signal_line_b.iloc[-2]
+        and macd_line_b.iloc[-1] > signal_line_b.iloc[-1]
+        and max_7_hist.iloc[-2] < 0
+    )
+
+    if not (setup_a or setup_b):
         return False
-    crossed = prev_close <= prev_hma_fast and curr_close > curr_hma_fast
-    in_zone = curr_hma_slow < curr_close < curr_hma_fast
-    return crossed and in_zone
 
+    # ═══════════════════════════════════════════════════════
+    # Overall filters — always required
+    # ═══════════════════════════════════════════════════════
 
-# ── Confirmation 2: MACD Setup ────────────────────────────
+    rsi_vals = rsi(weekly_df["close"], RSI_PERIOD)
 
-def check_macd_setup(macd_line: pd.Series, signal_line: pd.Series,
-                     histogram: pd.Series) -> bool:
-    if len(histogram) < MACD_MIN_HISTOGRAM_BARS + 5:
+    # 1. Weekly RSI(9) >= 40
+    if rsi_vals.iloc[-1] < 40:
         return False
-    recent = histogram.iloc[-(MACD_MIN_HISTOGRAM_BARS + 5):]
-    neg_run = 0
-    for val in recent:
-        if val < 0:
-            neg_run += 1
-            if neg_run >= MACD_MIN_HISTOGRAM_BARS:
-                break
-        else:
-            neg_run = 0
-    else:
+
+    # 2. Weekly WMA(RSI(9), 11) < Weekly RSI(9)
+    if wma(rsi_vals, 11).iloc[-1] >= rsi_vals.iloc[-1]:
         return False
-    crossover = (macd_line.iloc[-2] <= signal_line.iloc[-2] and
-                 macd_line.iloc[-1] > signal_line.iloc[-1])
-    first_green = histogram.iloc[-1] > 0 and histogram.iloc[-2] <= 0
-    return crossover and first_green
 
-
-# ── Confirmation 3: RSI Setup ─────────────────────────────
-
-def check_rsi_setup(rsi_vals: pd.Series) -> bool:
-    if len(rsi_vals) < RSI_WMA_PERIOD + 5:
+    # 3. Daily Close > 50
+    if daily_data and len(daily_data) and daily_data[-1]["close"] <= 50:
         return False
-    rsi_sma = rsi_vals.rolling(window=RSI_SMA_PERIOD).mean()
-    rsi_wma = wma(rsi_vals, RSI_WMA_PERIOD)
-    curr_rsi = rsi_vals.iloc[-1]
-    curr_sma = rsi_sma.iloc[-1]
-    curr_wma = rsi_wma.iloc[-1]
-    if pd.isna(curr_sma) or pd.isna(curr_wma):
+
+    # 4. Volume(1 day ago) > 50,000
+    if daily_data and len(daily_data) > 1 and daily_data[-2]["volume"] <= 50000:
         return False
-    prev_rsi = rsi_vals.iloc[-2]
-    prev_sma = rsi_sma.iloc[-2]
-    prev_wma = rsi_wma.iloc[-2]
-    if pd.isna(prev_sma) or pd.isna(prev_wma):
-        return curr_rsi > curr_wma and curr_sma > curr_wma
-    above_wma = curr_rsi > curr_wma and curr_sma > curr_wma
-    crossed = ((prev_rsi <= prev_wma and curr_rsi > curr_wma) or
-               (prev_sma <= prev_wma and curr_sma > curr_wma))
-    return above_wma or crossed
 
-
-# ── All 3 confirmations ───────────────────────────────────
-
-def all_confirmations(df: pd.DataFrame) -> bool:
-    if len(df) < max(HMA_SLOW, RSI_WMA_PERIOD) + 10:
+    # 5. Market Cap > 1000
+    if market_cap <= 1000:
         return False
-    rsi_vals = rsi(df["close"], RSI_PERIOD)
-    macd_line, signal_line, histogram = macd(
-        df["close"], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-    c1 = check_hma_setup(df)
-    c2 = check_macd_setup(macd_line, signal_line, histogram)
-    c3 = check_rsi_setup(rsi_vals)
-    return c1 and c2 and c3
+
+    # 6. Weekly MACD Histogram(21,3,9) > 0
+    if hist_a.iloc[-1] <= 0:
+        return False
+
+    # 7. Weekly HA-Close > HA-Open (and 1 week ago also)
+    if not (
+        ha_close.iloc[-1] > ha_open.iloc[-1]
+        and ha_close.iloc[-2] > ha_open.iloc[-2]
+    ):
+        return False
+
+    # 8. Daily Close > Daily Open
+    if daily_data and len(daily_data) and daily_data[-1]["close"] <= daily_data[-1]["open"]:
+        return False
+
+    # 9. Weekly Min(10, MACD Histogram(21,3,9)) < -20
+    if hist_a.rolling(10).min().iloc[-1] >= -20:
+        return False
+
+    # 10. Weekly Volume > SMA(Weekly Close, 7)
+    if weekly_df["volume"].iloc[-1] <= weekly_df["close"].rolling(7).mean().iloc[-1]:
+        return False
+
+    return True
 
 
 # ── Swing Low / High ──────────────────────────────────────
@@ -159,7 +212,8 @@ def resample_weekly(daily: list[dict]) -> pd.DataFrame:
 
 # ── Import constants (kept at bottom to avoid circular refs) ──
 from swing_config import (
-    HMA_FAST, HMA_SLOW,
-    MACD_FAST, MACD_SLOW, MACD_SIGNAL, MACD_MIN_HISTOGRAM_BARS,
-    RSI_PERIOD, RSI_SMA_PERIOD, RSI_WMA_PERIOD,
+    MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    MACD_B_FAST, MACD_B_SLOW, MACD_B_SIGNAL,
+    RSI_PERIOD,
+    MIN_WEEKLY_BARS,
 )

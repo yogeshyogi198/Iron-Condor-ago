@@ -22,6 +22,11 @@ MACD_SLOW = 21
 MACD_SIGNAL = 9
 MACD_MIN_HISTOGRAM_BARS = 8
 
+# MACD params for Setup B (slow=11 instead of 21)
+MACD_B_FAST = 3
+MACD_B_SLOW = 11
+MACD_B_SIGNAL = 9
+
 # ── Confirmation 3: Custom RSI ─────────────────────────────
 RSI_PERIOD = 9
 RSI_SMA_PERIOD = 3
@@ -43,5 +48,6 @@ MARKET_CLOSE = time(15, 30)
 SCANNER_DAYS = [6, 0]
 
 # ── Historical Data ────────────────────────────────────────
-DAILY_LOOKBACK_DAYS = 300
+DAILY_LOOKBACK_DAYS = 550
+MIN_WEEKLY_BARS = 60
 KITE_REQUEST_DELAY = 0.35

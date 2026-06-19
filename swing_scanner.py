@@ -32,7 +32,7 @@ from swing_config import (
     NIFTY_500_URL, NIFTY_500_CACHE,
     HMA_FAST, HMA_SLOW, RSI_PERIOD,
     DAILY_LOOKBACK_DAYS, KITE_REQUEST_DELAY,
-    SWING_LOOKBACK_WEEKS,
+    SWING_LOOKBACK_WEEKS, MIN_WEEKLY_BARS,
 )
 from swing_indicators import (
     hma, rsi,
@@ -249,13 +249,13 @@ def main():
             time.sleep(KITE_REQUEST_DELAY)
             continue
         weekly = resample_weekly(daily)
-        if len(weekly) < 60:
-            print("skipped (<60 weeks)")
+        if len(weekly) < MIN_WEEKLY_BARS:
+            print(f"skipped (<{MIN_WEEKLY_BARS} weeks)")
             skipped += 1
             time.sleep(KITE_REQUEST_DELAY)
             continue
         try:
-            confirmed = all_confirmations(weekly)
+            confirmed = all_confirmations(weekly, daily_data=daily)
         except Exception:
             print("error")
             errors += 1
