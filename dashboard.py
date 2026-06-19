@@ -591,33 +591,35 @@ PAGE = r"""<!DOCTYPE html>
     .stat-pill { padding:6px 14px; font-size:0.8rem; min-width:100px; }
   }
   @media (max-width:768px) {
-    body { padding:12px; }
+    body { padding:16px; }
     .hero { margin-bottom:18px; }
     .hero-icon { width:40px; height:40px; font-size:20px; border-radius:10px; }
-    .hero-title h1 { font-size:1.2rem; }
-    .hero-sub { font-size:0.65rem; }
+    .hero-title h1 { font-size:1.4rem; }
+    .hero-sub { font-size:0.75rem; }
     .hero-clock { display:none; }
-    .card { padding:14px; margin-bottom:14px; border-radius:14px; }
+    .card { padding:18px; margin-bottom:16px; border-radius:14px; }
     .card-header { margin-bottom:10px; }
-    .mkt-grid { grid-template-columns:1fr 1fr; gap:8px; }
-    .mkt-card { padding:12px; }
-    .mkt-spot { font-size:1.15rem; }
-    .mkt-pcr-big { font-size:1.4rem; }
-    .sum-grid { grid-template-columns:repeat(2,1fr); gap:8px; }
-    .sum-item { padding:10px; }
-    .sum-value { font-size:1rem; }
-    .strat-grid { grid-template-columns:1fr; gap:12px; }
-    .strat { padding:16px; border-radius:14px; }
-    .strat .actions { gap:6px; flex-wrap:wrap; }
-    .strat .actions .btn { flex:1; min-width:72px; padding:10px 12px; font-size:0.82rem; }
-    .mini-log { font-size:0.7rem; max-height:140px; padding:10px; }
-    .status-row { gap:8px; }
-    .stat-pill { min-width:auto; flex:1; padding:6px 10px; font-size:0.75rem; }
+    .mkt-grid { grid-template-columns:1fr 1fr; gap:10px; }
+    .mkt-card { padding:14px; }
+    .mkt-spot { font-size:1.3rem; }
+    .mkt-pcr-big { font-size:1.6rem; }
+    .sum-grid { grid-template-columns:repeat(2,1fr); gap:10px; }
+    .sum-item { padding:12px; }
+    .sum-value { font-size:1.15rem; }
+    .strat-grid { grid-template-columns:1fr; gap:14px; }
+    .strat { padding:20px; border-radius:14px; }
+    .strat .actions { gap:8px; flex-wrap:wrap; }
+    .strat .actions .btn { flex:1; min-width:80px; padding:12px 14px; font-size:0.9rem; }
+    .mini-log { font-size:0.78rem; max-height:160px; padding:12px; }
+    .status-row { gap:10px; }
+    .stat-pill { min-width:auto; flex:1; padding:8px 12px; font-size:0.82rem; }
     .stat-pill .sp-mini { display:none; }
-    .tab-bar { gap:2px; }
-    .tab-bar button { padding:8px 14px; font-size:0.8rem; }
-    .btn { padding:10px 14px; font-size:0.82rem; }
-    input { padding:10px 14px; font-size:0.85rem; }
+    .tab-bar { gap:4px; }
+    .tab-bar button { padding:10px 16px; font-size:0.85rem; }
+    .btn { padding:12px 16px; font-size:0.9rem; }
+    input { padding:12px 16px; font-size:0.9rem; }
+    .theme-switch { gap:10px; padding:8px; }
+    .swatch { width:40px; height:40px; border-width:3px; }
   }
 
   @media (prefers-reduced-motion:reduce) {
