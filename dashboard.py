@@ -30,8 +30,59 @@ from flask import Flask, jsonify, redirect, render_template_string, request, ses
 from kiteconnect import KiteConnect
 
 from ticker_manager import TickerManager
-
 ticker_mgr = TickerManager()
+_ticker_initialized = False
+
+
+def init_ticker_once(kite: KiteConnect):
+    """Set up the WebSocket ticker once at startup or on first market fetch."""
+    global _ticker_initialized
+    if _ticker_initialized:
+        return
+    try:
+        resp = kite.instruments("NFO")
+        atm_tokens = {}
+        index_map = [
+            ("nifty", "NFO", "NIFTY", 50, "NSE:NIFTY 50"),
+            ("banknifty", "NFO", "BANKNIFTY", 100, "NSE:NIFTY BANK"),
+            ("sensex", "BFO", "SENSEX", 100, "BSE:SENSEX"),
+        ]
+        for idx_name, exchange, name, step, sym in index_map:
+            q = kite.quote(sym).get(sym, {})
+            spot = q.get("last_price", 0)
+            if not spot:
+                continue
+            atm_strike = round(spot / step) * step
+            if exchange == "NFO":
+                insts = [r for r in resp if r.get("name") == name and r.get("instrument_type") == "CE"]
+            else:
+                try:
+                    insts = kite.instruments("BFO")
+                    insts = [r for r in insts if r.get("name") == "SENSEX" and r.get("instrument_type") == "CE"]
+                except Exception:
+                    insts = []
+            best_token = None
+            best_diff = float("inf")
+            for r in insts:
+                try:
+                    strike = float(r.get("strike", 0))
+                    diff = abs(strike - atm_strike)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_token = r.get("instrument_token")
+                        if diff == 0:
+                            break
+                except (TypeError, ValueError):
+                    continue
+            if best_token is not None:
+                atm_tokens[idx_name] = best_token
+        ticker_mgr.configure(kite.api_key, kite.access_token)
+        ticker_mgr.update_subscriptions(atm_tokens)
+        ticker_mgr.start()
+        _ticker_initialized = True
+    except Exception:
+        pass
+
 
 load_dotenv()
 
@@ -1693,35 +1744,7 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             result["pcr"] = round(pcr, 4)
             nifty_chg = result.get("nifty", {}).get("change_pct", 0)
             result["sentiment"] = classify_pcr(pcr, nifty_chg)
-        # ━━━ Ticker: find ATM CE tokens & subscribe ━━━
-        atm_tokens = {}
-        for idx_name, exchange, name, step in [
-            ("nifty", "NFO", "NIFTY", 50),
-            ("banknifty", "NFO", "BANKNIFTY", 100),
-            ("sensex", "BFO", "SENSEX", 100),
-        ]:
-            spot = result.get(idx_name, {}).get("spot", 0)
-            if not spot:
-                continue
-            atm_strike = round(spot / step) * step
-            if exchange == "NFO":
-                insts = [r for r in resp if r.get("name") == name and r.get("instrument_type") == "CE"]
-            else:
-                try:
-                    insts = kite.instruments("BFO")
-                    insts = [r for r in insts if r.get("name") == "SENSEX" and r.get("instrument_type") == "CE"]
-                except Exception:
-                    insts = []
-            for r in insts:
-                try:
-                    if float(r.get("strike", 0)) == atm_strike:
-                        atm_tokens[idx_name] = r.get("instrument_token")
-                        break
-                except (TypeError, ValueError):
-                    continue
-        ticker_mgr.configure(kite.api_key, kite.access_token)
-        ticker_mgr.start()
-        ticker_mgr.update_subscriptions(atm_tokens)
+        # ━━━ Read IV from the already-running ticker ━━━
         for idx in ("nifty", "sensex", "banknifty"):
             iv = ticker_mgr.get_iv(idx)
             if iv is not None:
@@ -1748,6 +1771,7 @@ def api_market():
     try:
         _dash_rate_limit()
         kite = KiteConnect(api_key=api_key, access_token=access_token, timeout=15)
+        init_ticker_once(kite)
         data = fetch_market_data(kite)
         _market_cache = {"data": data, "time": now}
         return jsonify(data)

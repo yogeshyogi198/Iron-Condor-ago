@@ -2037,7 +2037,7 @@ class SmaCrossover:
                 fill_prem = fills[tsym]
                 log.debug(f"ENTRY fill: {tsym} LTP={entry_prem} fill={fill_prem}")
 
-        # SL = option's own 3-min candle low (premium level), fallback to previous candle low
+        # SL = supertrend of option's own 3-min candle data, fallback to candle low
         sl = 0
         try:
             opt_token = None
@@ -2049,14 +2049,18 @@ class SmaCrossover:
             if opt_token:
                 to_dt = datetime.now()
                 opt_candles = self.kite.kite.historical_data(opt_token, to_dt - timedelta(hours=1), to_dt, "3minute")
-                if opt_candles and len(opt_candles) >= 2:
+                if opt_candles and len(opt_candles) >= 12:
+                    st = calc_supertrend(opt_candles, length=10, multiplier=3.0)
+                    if st:
+                        sl = st["supertrend"]
+                if (sl <= 0 or sl >= fill_prem) and opt_candles and len(opt_candles) >= 2:
                     sl = opt_candles[-1]["low"]
                     if sl <= 0 or sl >= fill_prem:
                         sl = opt_candles[-2]["low"]
         except Exception:
             pass
         if sl <= 0 or sl >= fill_prem:
-            print(f"  {red('✗')} Could not determine option candle low for {tsym}")
+            print(f"  {red('✗')} Could not determine stoploss for {tsym}")
             return False
 
         risk = abs(fill_prem - sl)
@@ -3330,7 +3334,7 @@ class Scalper3Min:
         qty = opt["lot_size"] * self.lots
         entry_prem = self._get_option_premium(tsym)
 
-        # SL = option's own 3-min candle low (premium level), fallback to previous candle low
+        # SL = supertrend of option's own 3-min candle data, fallback to candle low
         sl_price = 0
         try:
             opt_token = None
@@ -3341,14 +3345,18 @@ class Scalper3Min:
             if opt_token:
                 to_dt = datetime.now()
                 opt_candles = self.kite.kite.historical_data(opt_token, to_dt - timedelta(hours=1), to_dt, SCALP_TIMEFRAME)
-                if opt_candles and len(opt_candles) >= 2:
+                if opt_candles and len(opt_candles) >= 12:
+                    st = calc_supertrend(opt_candles, length=SCALP_SUPERTREND_LENGTH, multiplier=SCALP_SUPERTREND_MULTIPLIER)
+                    if st:
+                        sl_price = st["supertrend"]
+                if (sl_price <= 0 or sl_price >= entry_prem) and opt_candles and len(opt_candles) >= 2:
                     sl_price = opt_candles[-1]["low"]
                     if sl_price <= 0 or sl_price >= entry_prem:
                         sl_price = opt_candles[-2]["low"]
         except Exception:
             pass
         if sl_price <= 0 or sl_price >= entry_prem:
-            print(f"  {red('✗')} Could not determine option candle low for {tsym}")
+            print(f"  {red('✗')} Could not determine stoploss for {tsym}")
             return False
         risk = abs(entry_prem - sl_price)
 
