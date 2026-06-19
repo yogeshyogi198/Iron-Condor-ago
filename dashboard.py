@@ -30,73 +30,10 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
 
-from ticker_manager import TickerManager
+from ticker_manager import fetch_iv_all
 
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("dashboard")
-
-ticker_mgr = TickerManager()
-_ticker_initialized = False
-
-
-def init_ticker_once(kite: KiteConnect):
-    """Set up the WebSocket ticker once at startup or on first market fetch."""
-    global _ticker_initialized
-    if _ticker_initialized:
-        return
-    print("[ticker] Initializing WebSocket ticker for IV streaming...")
-    try:
-        resp = kite.instruments("NFO")
-        print(f"[ticker] Got {len(resp)} NFO instruments")
-        atm_tokens = {}
-        index_map = [
-            ("nifty", "NFO", "NIFTY", 50, "NSE:NIFTY 50"),
-            ("banknifty", "NFO", "BANKNIFTY", 100, "NSE:NIFTY BANK"),
-            ("sensex", "BFO", "SENSEX", 100, "BSE:SENSEX"),
-        ]
-        for idx_name, exchange, name, step, sym in index_map:
-            q = kite.quote(sym)
-            spot_data = q.get(sym, {})
-            spot = spot_data.get("last_price", 0)
-            if not spot:
-                print(f"[ticker] Skipping {idx_name}: spot={spot}")
-                continue
-            atm_strike = round(spot / step) * step
-            if exchange == "NFO":
-                insts = [r for r in resp if r.get("name") == name and r.get("instrument_type") == "CE"]
-            else:
-                try:
-                    insts = kite.instruments("BFO")
-                    insts = [r for r in insts if r.get("name") == "SENSEX" and r.get("instrument_type") == "CE"]
-                except Exception as e:
-                    print(f"[ticker] BFO instruments error: {e}")
-                    insts = []
-            best_token = None
-            best_diff = float("inf")
-            for r in insts:
-                try:
-                    strike = float(r.get("strike", 0))
-                    diff = abs(strike - atm_strike)
-                    if diff < best_diff:
-                        best_diff = diff
-                        best_token = r.get("instrument_token")
-                        if diff == 0:
-                            break
-                except (TypeError, ValueError):
-                    continue
-            if best_token is not None:
-                atm_tokens[idx_name] = best_token
-                print(f"[ticker] {idx_name} ATM token={best_token} strike={atm_strike} spot={spot}")
-            else:
-                print(f"[ticker] {idx_name} no token found for atm_strike={atm_strike}")
-        print(f"[ticker] Subscribing to tokens: {atm_tokens}")
-        ticker_mgr.configure(kite.api_key, kite.access_token)
-        ticker_mgr.update_subscriptions(atm_tokens)
-        ticker_mgr.start()
-        _ticker_initialized = True
-        print("[ticker] WebSocket ticker started")
-    except Exception as e:
-        print(f"[ticker] init error: {e}")
 
 
 load_dotenv()
@@ -1056,7 +993,6 @@ async function fetchMarket(){
   try{
     const d=await(await fetch('/api/market')).json();
     if(d.error)return;
-    if(d._ticker)console.log('ticker status:',JSON.stringify(d._ticker));
     for(const [prefix,key] of [['nifty','nifty'],['sensex','sensex'],['banknifty','banknifty']]){
       const v=d[key];if(!v)continue;
       const spotEl=$('m-'+prefix+'-spot');
@@ -1759,16 +1695,11 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             result["pcr"] = round(pcr, 4)
             nifty_chg = result.get("nifty", {}).get("change_pct", 0)
             result["sentiment"] = classify_pcr(pcr, nifty_chg)
-        # ━━━ Read IV from the already-running ticker ━━━
-        for idx in ("nifty", "sensex", "banknifty"):
-            iv = ticker_mgr.get_iv(idx)
-            if iv is not None:
-                result[idx]["iv"] = iv
-        result["_ticker"] = {
-            "connected": ticker_mgr.is_connected(),
-            "initialized": _ticker_initialized,
-            "iv_keys": list(ticker_mgr.iv_data.keys()) if hasattr(ticker_mgr, "iv_data") else [],
-        }
+        # ━━━ Fetch IV via REST API ━━━
+        iv_data = fetch_iv_all(kite)
+        for idx, val in iv_data.items():
+            if idx in result and val is not None:
+                result[idx]["iv"] = val
         result["time"] = datetime.now().strftime("%H:%M:%S")
     except Exception:
         pass
@@ -1791,7 +1722,6 @@ def api_market():
     try:
         _dash_rate_limit()
         kite = KiteConnect(api_key=api_key, access_token=access_token, timeout=15)
-        init_ticker_once(kite)
         data = fetch_market_data(kite)
         _market_cache = {"data": data, "time": now}
         return jsonify(data)
