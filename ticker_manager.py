@@ -6,23 +6,20 @@ from kiteconnect import KiteTicker
 
 logger = logging.getLogger(__name__)
 
+# ── Thread-local: override signal.signal to suppress Twisted's SIGINT crash in non-main threads ──
+_orig_signal_signal = signal.signal
 
-def _suppress_twisted_signals():
-    """Suppress Twisted signal handler installation in non-main threads."""
+
+def _safe_signal(signalnum, handler):
     try:
-        from twisted.internet._signals import _SignalHandlers
-        _orig_install = _SignalHandlers.install
-        def _safe_install(self):
-            try:
-                _orig_install(self)
-            except ValueError:
-                pass
-        _SignalHandlers.install = _safe_install
-    except Exception:
-        try:
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
-        except (ValueError, RuntimeError):
-            pass
+        return _orig_signal_signal(signalnum, handler)
+    except ValueError:
+        return None
+
+
+def _patch_signal_for_thread():
+    """Replace signal.signal with a no-op that swallows ValueError in non-main threads."""
+    signal.signal = _safe_signal
 
 
 class TickerManager:
@@ -82,7 +79,7 @@ class TickerManager:
                 time.sleep(0.1)
 
     def _connect(self):
-        _suppress_twisted_signals()
+        _patch_signal_for_thread()
         with self._lock:
             ak = self._api_key
             at = self._access_token
