@@ -112,7 +112,7 @@ def fetch_iv_all(kite, instruments_by_exchange=None):
                         logger.warning("fetch_iv_all: no expiry found for %s", name)
                         continue
 
-                    atm_strike = round(spot / step) * step
+                    atm_strike = int(spot / step + 0.5) * step
 
                     ce_symbol = pe_symbol = None
                     for r in resp:

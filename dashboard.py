@@ -1005,9 +1005,14 @@ async function fetchMarket(){
       $('m-'+prefix+'-low').textContent=v.low.toLocaleString('en-IN',{minimumFractionDigits:2});
       $('m-'+prefix+'-range').textContent=(v.high-v.low).toLocaleString('en-IN',{minimumFractionDigits:2})+' pts';
       const ivEl=$('m-'+prefix+'-iv');
-      if(v.ivp!==undefined&&v.ivp!==null){ivEl.textContent='IVP: '+v.ivp+'% - '+v.ivp_label;}
-      else if(v.iv!==undefined&&v.iv!==null){ivEl.textContent='IV: '+v.iv+'%';}
-      else{ivEl.textContent='--';}
+      if(v.iv!==undefined&&v.iv!==null){
+        let label=v.iv_label||'';
+        let labelColor=C.amber;
+        if(label==='LOW')labelColor=C.green;
+        else if(label==='HIGH')labelColor=C.red;
+        else if(label==='NORMAL')labelColor=C.blue;
+        ivEl.innerHTML='IV: '+v.iv+'% <span style="color:'+labelColor+';font-weight:700;">('+label+')</span>';
+      }else{ivEl.textContent='--';}
     }
     if(d.pcr){
       $('m-pcr').textContent=d.pcr.toFixed(2);
@@ -1625,6 +1630,20 @@ def _merge_breakdown(bd_list: list[dict]) -> dict:
 _market_cache = {"data": None, "time": 0}
 
 # ━━━ [5h] Market data helpers ━━━
+IV_THRESHOLDS = {
+    "nifty":     {"low": 12.0, "high": 18.0},
+    "sensex":    {"low": 12.0, "high": 18.0},
+    "banknifty": {"low": 14.0, "high": 20.0},
+}
+
+def classify_iv(index_name: str, iv: float) -> str:
+    t = IV_THRESHOLDS.get(index_name, {"low": 12.0, "high": 18.0})
+    if iv < t["low"]:
+        return "LOW"
+    if iv > t["high"]:
+        return "HIGH"
+    return "NORMAL"
+
 def classify_pcr(pcr: float, price_change_pct: float = 0) -> str:
     if pcr >= 1.30:
         return "STRONG BULLISH"
@@ -1707,6 +1726,7 @@ def fetch_market_data(kite: KiteConnect) -> dict:
         for idx, val in iv_data.items():
             if idx in result and val is not None:
                 result[idx]["iv"] = val
+                result[idx]["iv_label"] = classify_iv(idx, val)
                 result[idx]["ivp"] = get_ivp(idx, val)
                 result[idx]["ivp_label"] = ivp_label(result[idx]["ivp"])
         result["time"] = datetime.now().strftime("%H:%M:%S")
