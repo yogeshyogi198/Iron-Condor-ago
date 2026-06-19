@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
 
-from ticker_manager import fetch_iv_all
+from ticker_manager import fetch_iv_all, record_iv, get_ivp, ivp_label
 
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("dashboard")
@@ -1005,10 +1005,9 @@ async function fetchMarket(){
       $('m-'+prefix+'-low').textContent=v.low.toLocaleString('en-IN',{minimumFractionDigits:2});
       $('m-'+prefix+'-range').textContent=(v.high-v.low).toLocaleString('en-IN',{minimumFractionDigits:2})+' pts';
       const ivEl=$('m-'+prefix+'-iv');
-      if(v.iv!==undefined&&v.iv!==null){ivEl.textContent='IV: '+v.iv+'%';}
-      else{
-        ivEl.textContent='--';
-      }
+      if(v.ivp!==undefined&&v.ivp!==null){ivEl.textContent='IVP: '+v.ivp+'% - '+v.ivp_label;}
+      else if(v.iv!==undefined&&v.iv!==null){ivEl.textContent='IV: '+v.iv+'%';}
+      else{ivEl.textContent='--';}
     }
     if(d.pcr){
       $('m-pcr').textContent=d.pcr.toFixed(2);
@@ -1649,7 +1648,8 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             try:
                 q = kite.quote(sym)[sym]
                 quotes[sym] = q
-            except Exception:
+            except Exception as e:
+                logger.warning("fetch_market_data: quote failed for %s — %s", sym, e)
                 continue
         labels = {"NSE:NIFTY 50": "nifty", "BSE:SENSEX": "sensex", "NSE:NIFTY BANK": "banknifty"}
         for sym, key in labels.items():
@@ -1695,14 +1695,23 @@ def fetch_market_data(kite: KiteConnect) -> dict:
             result["pcr"] = round(pcr, 4)
             nifty_chg = result.get("nifty", {}).get("change_pct", 0)
             result["sentiment"] = classify_pcr(pcr, nifty_chg)
-        # ━━━ Fetch IV via REST API ━━━
-        iv_data = fetch_iv_all(kite)
+        # ━━━ Fetch IV + IVP via REST API ━━━
+        iv_instruments = {"NFO": resp}
+        try:
+            iv_instruments["BFO"] = kite.instruments("BFO")
+        except Exception as e:
+            logger.warning("fetch_market_data: BFO instruments fetch failed — %s", e)
+        iv_data = fetch_iv_all(kite, iv_instruments)
+        if iv_data:
+            record_iv(iv_data)
         for idx, val in iv_data.items():
             if idx in result and val is not None:
                 result[idx]["iv"] = val
+                result[idx]["ivp"] = get_ivp(idx, val)
+                result[idx]["ivp_label"] = ivp_label(result[idx]["ivp"])
         result["time"] = datetime.now().strftime("%H:%M:%S")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("fetch_market_data: unexpected error — %s", e)
     return result
 
 
