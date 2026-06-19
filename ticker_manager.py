@@ -1,9 +1,28 @@
+import signal
 import threading
 import time
 import logging
 from kiteconnect import KiteTicker
 
 logger = logging.getLogger(__name__)
+
+
+def _suppress_twisted_signals():
+    """Suppress Twisted signal handler installation in non-main threads."""
+    try:
+        from twisted.internet._signals import _SignalHandlers
+        _orig_install = _SignalHandlers.install
+        def _safe_install(self):
+            try:
+                _orig_install(self)
+            except ValueError:
+                pass
+        _SignalHandlers.install = _safe_install
+    except Exception:
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except (ValueError, RuntimeError):
+            pass
 
 
 class TickerManager:
@@ -63,6 +82,7 @@ class TickerManager:
                 time.sleep(0.1)
 
     def _connect(self):
+        _suppress_twisted_signals()
         with self._lock:
             ak = self._api_key
             at = self._access_token
