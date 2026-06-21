@@ -72,6 +72,8 @@ import pandas as pd
 import numpy as np
 from kiteconnect import KiteConnect
 
+import telegram_logger
+
 # ---------------- CONFIG ----------------
 BOT_DIR = Path(__file__).parent
 CONFIG_FILE = BOT_DIR / "kite_config.json"
@@ -288,6 +290,20 @@ def main():
     log.info(f"Scan complete. {len(qualified)} stocks matched.")
     for s in qualified:
         print(s)
+
+    if qualified:
+        lines = [
+            "📊 NH MIX SCAN RESULTS",
+            f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"Qualified: {len(qualified)} stocks",
+            "",
+        ]
+        for s in qualified:
+            lines.append(f"• {s}")
+        telegram_logger.send_telegram("\n".join(lines), level="INFO")
+    else:
+        telegram_logger.send_telegram(
+            "📊 NH MIX SCAN\nNo stocks qualified.", level="INFO")
 
     return qualified
 
